@@ -41,7 +41,9 @@ def _get_postgres_test_url() -> str:
     return url
 
 
-def test_alembic_upgrade_and_downgrade_on_postgresql() -> None:
+def test_alembic_upgrade_and_downgrade_on_postgresql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     db_url = _get_postgres_test_url()
     engine = create_engine(db_url, pool_pre_ping=True)
     try:
@@ -50,6 +52,12 @@ def test_alembic_upgrade_and_downgrade_on_postgresql() -> None:
     except SQLAlchemyError as exc:
         engine.dispose()
         pytest.skip(f"PostgreSQL instance unavailable for migration test: {exc}")
+
+    # Regression guard: ambient DATABASE_URL must not override explicit Test config URL.
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg://wrong:wrong@127.0.0.1:59999/should_not_be_used",
+    )
 
     backend_dir = Path(__file__).resolve().parents[1]
     alembic_cfg = Config(str(backend_dir / "alembic.ini"))
@@ -64,6 +72,19 @@ def test_alembic_upgrade_and_downgrade_on_postgresql() -> None:
         inspector = inspect(engine)
         present_tables = set(inspector.get_table_names())
         assert EXPECTED_TABLES.issubset(present_tables)
+
+        user_indexes = {idx["name"] for idx in inspector.get_indexes("users")}
+        assert "uq_users_email_lower" in user_indexes
+
+        invoice_checks = {
+            ck["name"] for ck in inspector.get_check_constraints("invoices")
+        }
+        assert "ck_invoices_invoice_verified_requires_human_actor" in invoice_checks
+        assert "ck_invoices_invoice_soft_delete_unverified_only" in invoice_checks
+
+        invoice_fks = {fk["name"] for fk in inspector.get_foreign_keys("invoices")}
+        assert "fk_invoices_workspace_supplier" in invoice_fks
+        assert "fk_invoices_workspace_document" in invoice_fks
 
         command.downgrade(alembic_cfg, "base")
         inspector_after_down = inspect(engine)

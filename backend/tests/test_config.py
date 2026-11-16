@@ -83,3 +83,38 @@ def test_settings_enforces_cookie_secure_and_non_placeholder_secrets_in_producti
             jwt_secret_key="CHANGE_ME_WITH_A_SECURE_32_PLUS_CHAR_SECRET",
             cookie_secure=True,
         )
+
+
+def test_settings_accepts_comma_separated_and_json_cors_origins_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg://postgres:realpass@localhost:5432/norus_billwise",
+    )
+    monkeypatch.setenv("JWT_SECRET_KEY", VALID_SECRET)
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv(
+        "CORS_ORIGINS",
+        "http://localhost:3000, http://127.0.0.1:3000 ",
+    )
+
+    comma_settings = Settings(_env_file=None)
+    assert comma_settings.cors_origins == [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+    monkeypatch.setenv(
+        "CORS_ORIGINS",
+        '["https://app.norusbillwise.example", "https://admin.norusbillwise.example"]',
+    )
+    json_settings = Settings(_env_file=None)
+    assert json_settings.cors_origins == [
+        "https://app.norusbillwise.example",
+        "https://admin.norusbillwise.example",
+    ]
+
+    monkeypatch.setenv("CORS_ORIGINS", "http://localhost:3000, *")
+    with pytest.raises(ValidationError, match="wildcard"):
+        Settings(_env_file=None)

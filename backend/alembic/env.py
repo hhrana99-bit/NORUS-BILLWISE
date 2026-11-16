@@ -18,21 +18,24 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+DEFAULT_ALEMBIC_URL = "postgresql+psycopg://postgres:postgres@localhost:5432/norus_billwise"
+
+
 def _resolve_database_url() -> str:
-    """Resolve database URL from CLI `-x db_url=...`, environment, or Settings."""
+    """Resolve database URL from `-x db_url=...`, explicit Alembic config, env, or Settings."""
     x_args = context.get_x_argument(as_dictionary=True)
     if x_args.get("db_url"):
         return str(x_args["db_url"])
 
     configured_url = config.get_main_option("sqlalchemy.url")
+    # Respect explicit programmatic overrides (e.g., TEST_DATABASE_URL in pytest)
+    # before falling back to ambient DATABASE_URL / .env settings.
+    if configured_url and configured_url != DEFAULT_ALEMBIC_URL:
+        return configured_url
+
     env_db_url = os.environ.get("DATABASE_URL")
     if env_db_url:
         return env_db_url
-
-    # Prefer application Settings when running normally so .env is honored,
-    # while allowing explicit programmatic override via alembic Config.
-    if configured_url and configured_url != "postgresql+psycopg://postgres:postgres@localhost:5432/norus_billwise":
-        return configured_url
 
     try:
         return get_settings().database_url
