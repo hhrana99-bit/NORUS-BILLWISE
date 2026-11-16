@@ -1,0 +1,6 @@
+{
+  "name": "NORUS BILLWISE",
+  "description": "AI-powered Invoice Intelligence and Verification Workspace by NORUS AI — Beyond the World.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
