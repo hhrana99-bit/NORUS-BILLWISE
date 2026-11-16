@@ -254,7 +254,7 @@ export function DashboardPage() {
               pendingQueue.map((inv) => (
                 <div
                   key={inv.id}
-                  className="flex items-center justify-between gap-3 px-5 py-3.5 hover:bg-slate-50/70"
+                  className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 hover:bg-slate-50/70 sm:flex-nowrap"
                 >
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2.5">

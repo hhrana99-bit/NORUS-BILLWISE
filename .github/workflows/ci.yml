@@ -1,0 +1,42 @@
+name: Frontend CI
+
+on:
+  push:
+    branches:
+      - main
+      - task-001-2-remediation
+  pull_request:
+    branches:
+      - main
+      - task-001-2-remediation
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-frontend:
+    name: Lint, Test & Build (Node 22)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies cleanly
+        run: npm ci
+
+      - name: TypeScript strict typecheck
+        run: npm run lint
+
+      - name: Run service unit tests
+        run: npm test
+
+      - name: Build production bundle
+        run: npm run build

@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -14,6 +15,15 @@ import {
   INITIAL_SETTINGS,
   INITIAL_SUPPLIERS,
 } from '../data/mockData';
+import {
+  detectDuplicateWarning,
+  removeLocalStagedInvoice,
+} from '../services/invoiceService';
+import {
+  isBlobObjectUrl,
+  revokeAllBlobUrls,
+  revokeUnusedBlobUrls,
+} from '../services/objectUrlService';
 import {
   clearAllDemoStorage,
   loadStoredInvoices,
@@ -31,6 +41,17 @@ import type {
   WorkspaceSettings,
 } from '../types/domain';
 
+export type PendingNavigation =
+  | {
+      type: 'route';
+      route: AppRoute;
+      options?: { invoiceId?: string; supplierFilterId?: string };
+    }
+  | {
+      type: 'invoice';
+      invoiceId: string;
+    };
+
 interface WorkspaceContextValue {
   activeRoute: AppRoute;
   navigate: (
@@ -44,9 +65,15 @@ interface WorkspaceContextValue {
   settings: WorkspaceSettings;
   selectedInvoiceId: string;
   selectInvoiceForReview: (invoiceId: string) => void;
+  hasUnsavedReviewChanges: boolean;
+  setHasUnsavedReviewChanges: (dirty: boolean) => void;
+  pendingNavigation: PendingNavigation | null;
+  cancelPendingNavigation: () => void;
+  commitPendingNavigation: () => void;
   supplierFilterId: string | null;
   clearSupplierFilter: () => void;
   addUploadedInvoice: (invoice: Invoice) => void;
+  deleteLocalInvoice: (invoiceId: string) => boolean;
   updateInvoice: (updatedInvoice: Invoice, actionSummary?: string) => void;
   updateInvoiceStatus: (
     invoiceId: string,
@@ -68,6 +95,21 @@ function formatNowLabel(): string {
   });
 }
 
+export function filterNotificationsBySettings(
+  items: NotificationItem[],
+  settings: Pick<
+    WorkspaceSettings,
+    'notifyFlaggedInvoices' | 'notifyDuplicateAlerts' | 'notifyDailyDigest'
+  >
+): NotificationItem[] {
+  return items.filter((item) => {
+    if (item.category === 'flagged') return settings.notifyFlaggedInvoices;
+    if (item.category === 'duplicate') return settings.notifyDuplicateAlerts;
+    if (item.category === 'digest') return settings.notifyDailyDigest;
+    return true;
+  });
+}
+
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [activeRoute, setActiveRoute] = useState<AppRoute>('dashboard');
   const [invoices, setInvoices] = useState<Invoice[]>(
@@ -84,8 +126,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     () => (loadStoredInvoices() ?? INITIAL_INVOICES)[0]?.id ?? 'inv-1041'
   );
   const [supplierFilterId, setSupplierFilterId] = useState<string | null>(null);
+  const [hasUnsavedReviewChanges, setHasUnsavedReviewChanges] = useState(false);
+  const [pendingNavigation, setPendingNavigation] =
+    useState<PendingNavigation | null>(null);
+
+  const invoicesRef = useRef<Invoice[]>(invoices);
+  const createdBlobUrlsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    invoicesRef.current = invoices;
     saveStoredInvoices(invoices);
   }, [invoices]);
 
@@ -93,7 +142,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     saveStoredSettings(settings);
   }, [settings]);
 
-  const navigate = useCallback(
+  useEffect(() => {
+    const trackedUrls = createdBlobUrlsRef.current;
+    return () => {
+      for (const url of trackedUrls) {
+        if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+          URL.revokeObjectURL(url);
+        }
+      }
+      trackedUrls.clear();
+    };
+  }, []);
+
+  const performRouteNavigation = useCallback(
     (
       route: AppRoute,
       options?: { invoiceId?: string; supplierFilterId?: string }
@@ -111,10 +172,60 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     []
   );
 
-  const selectInvoiceForReview = useCallback((invoiceId: string) => {
-    setSelectedInvoiceId(invoiceId);
-    setActiveRoute('review');
+  const navigate = useCallback(
+    (
+      route: AppRoute,
+      options?: { invoiceId?: string; supplierFilterId?: string }
+    ) => {
+      const wouldLeaveReview = activeRoute === 'review' && route !== 'review';
+      const wouldSwitchInvoice =
+        activeRoute === 'review' &&
+        route === 'review' &&
+        Boolean(options?.invoiceId && options.invoiceId !== selectedInvoiceId);
+
+      if (hasUnsavedReviewChanges && (wouldLeaveReview || wouldSwitchInvoice)) {
+        setPendingNavigation({ type: 'route', route, options });
+        return;
+      }
+
+      performRouteNavigation(route, options);
+    },
+    [activeRoute, hasUnsavedReviewChanges, performRouteNavigation, selectedInvoiceId]
+  );
+
+  const selectInvoiceForReview = useCallback(
+    (invoiceId: string) => {
+      const wouldSwitchInvoice =
+        activeRoute === 'review' && invoiceId !== selectedInvoiceId;
+
+      if (hasUnsavedReviewChanges && wouldSwitchInvoice) {
+        setPendingNavigation({ type: 'invoice', invoiceId });
+        return;
+      }
+
+      setSelectedInvoiceId(invoiceId);
+      setActiveRoute('review');
+    },
+    [activeRoute, hasUnsavedReviewChanges, selectedInvoiceId]
+  );
+
+  const cancelPendingNavigation = useCallback(() => {
+    setPendingNavigation(null);
   }, []);
+
+  const commitPendingNavigation = useCallback(() => {
+    const target = pendingNavigation;
+    setPendingNavigation(null);
+    setHasUnsavedReviewChanges(false);
+    if (!target) return;
+
+    if (target.type === 'invoice') {
+      setSelectedInvoiceId(target.invoiceId);
+      setActiveRoute('review');
+    } else {
+      performRouteNavigation(target.route, target.options);
+    }
+  }, [pendingNavigation, performRouteNavigation]);
 
   const clearSupplierFilter = useCallback(() => {
     setSupplierFilterId(null);
@@ -132,42 +243,179 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     []
   );
 
+  const appendNotification = useCallback(
+    (item: Omit<NotificationItem, 'id' | 'timeLabel' | 'read'>) => {
+      const entry: NotificationItem = {
+        id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timeLabel: 'Just now',
+        read: false,
+        ...item,
+      };
+      setNotifications((prev) => [entry, ...prev].slice(0, 12));
+    },
+    []
+  );
+
   const addUploadedInvoice = useCallback(
     (invoice: Invoice) => {
-      setInvoices((prev) => [invoice, ...prev]);
-      setSelectedInvoiceId(invoice.id);
+      if (isBlobObjectUrl(invoice.localPreviewUrl)) {
+        createdBlobUrlsRef.current.add(invoice.localPreviewUrl);
+      }
+
+      const dupWarning = settings.enableDuplicateWarnings
+        ? detectDuplicateWarning(invoice, invoicesRef.current)
+        : undefined;
+      const stagedInvoice: Invoice = dupWarning
+        ? { ...invoice, duplicateWarning: dupWarning }
+        : invoice;
+
+      const next = [stagedInvoice, ...invoicesRef.current];
+      invoicesRef.current = next;
+      setInvoices(next);
+      setSelectedInvoiceId(stagedInvoice.id);
       appendActivity({
         actor: 'CA Ananya Deshmukh',
-        action: `Staged local file "${invoice.documentFileName}" into Pending Review`,
-        invoiceId: invoice.id,
-        invoiceNumber: invoice.invoiceNumber,
+        action: `Staged local file "${stagedInvoice.documentFileName}" into Pending Review`,
+        invoiceId: stagedInvoice.id,
+        invoiceNumber: stagedInvoice.invoiceNumber,
         tone: 'neutral',
       });
+
+      if (dupWarning && settings.notifyDuplicateAlerts) {
+        appendNotification({
+          title: 'Potential duplicate staged',
+          detail: `${stagedInvoice.invoiceNumber}: ${dupWarning}`,
+          targetRoute: 'review',
+          targetInvoiceId: stagedInvoice.id,
+          category: 'duplicate',
+        });
+      }
     },
-    [appendActivity]
+    [
+      appendActivity,
+      appendNotification,
+      settings.enableDuplicateWarnings,
+      settings.notifyDuplicateAlerts,
+    ]
+  );
+
+  const deleteLocalInvoice = useCallback(
+    (invoiceId: string): boolean => {
+      const prev = invoicesRef.current;
+      const { updated, removed } = removeLocalStagedInvoice(prev, invoiceId);
+      if (!removed) return false;
+
+      const revoked = revokeUnusedBlobUrls(prev, updated);
+      for (const url of revoked) {
+        createdBlobUrlsRef.current.delete(url);
+      }
+
+      invoicesRef.current = updated;
+      setInvoices(updated);
+      setNotifications((prevNotifs) =>
+        prevNotifs.filter((n) => n.targetInvoiceId !== invoiceId)
+      );
+
+      if (selectedInvoiceId === invoiceId) {
+        setHasUnsavedReviewChanges(false);
+        setSelectedInvoiceId(updated[0]?.id ?? '');
+      }
+      if (
+        pendingNavigation &&
+        ((pendingNavigation.type === 'invoice' &&
+          pendingNavigation.invoiceId === invoiceId) ||
+          (pendingNavigation.type === 'route' &&
+            pendingNavigation.options?.invoiceId === invoiceId))
+      ) {
+        setPendingNavigation(null);
+      }
+
+      appendActivity({
+        actor: 'CA Ananya Deshmukh',
+        action: `Removed locally staged demo invoice "${removed.documentFileName}" (local browser only)`,
+        invoiceNumber: removed.invoiceNumber,
+        tone: 'neutral',
+      });
+
+      return true;
+    },
+    [appendActivity, pendingNavigation, selectedInvoiceId]
   );
 
   const updateInvoice = useCallback(
     (updatedInvoice: Invoice, actionSummary?: string) => {
-      setInvoices((prev) =>
-        prev.map((inv) => (inv.id === updatedInvoice.id ? updatedInvoice : inv))
+      const prevList = invoicesRef.current;
+      const dupWarning = settings.enableDuplicateWarnings
+        ? detectDuplicateWarning(updatedInvoice, prevList)
+        : updatedInvoice.duplicateWarning;
+
+      const finalInvoice: Invoice = {
+        ...updatedInvoice,
+        duplicateWarning: dupWarning,
+      };
+
+      if (isBlobObjectUrl(finalInvoice.localPreviewUrl)) {
+        createdBlobUrlsRef.current.add(finalInvoice.localPreviewUrl);
+      }
+
+      const nextList = prevList.map((inv) =>
+        inv.id === finalInvoice.id ? finalInvoice : inv
       );
+      const revoked = revokeUnusedBlobUrls(prevList, nextList);
+      for (const url of revoked) {
+        createdBlobUrlsRef.current.delete(url);
+      }
+
+      invoicesRef.current = nextList;
+      setInvoices(nextList);
+
       const tone: ActivityEvent['tone'] =
-        updatedInvoice.status === 'Verified'
+        finalInvoice.status === 'Verified'
           ? 'success'
-          : updatedInvoice.status === 'Flagged'
+          : finalInvoice.status === 'Flagged'
             ? 'warning'
             : 'neutral';
 
       appendActivity({
         actor: 'CA Ananya Deshmukh',
         action: actionSummary ?? 'Saved review changes to invoice fields',
-        invoiceId: updatedInvoice.id,
-        invoiceNumber: updatedInvoice.invoiceNumber,
+        invoiceId: finalInvoice.id,
+        invoiceNumber: finalInvoice.invoiceNumber,
         tone,
       });
+
+      if (finalInvoice.status === 'Flagged' && settings.notifyFlaggedInvoices) {
+        appendNotification({
+          title: `Invoice flagged: ${finalInvoice.invoiceNumber}`,
+          detail:
+            finalInvoice.flagReason ??
+            'Flagged in Review Centre for secondary verification.',
+          targetRoute: 'review',
+          targetInvoiceId: finalInvoice.id,
+          category: 'flagged',
+        });
+      } else if (
+        settings.enableDuplicateWarnings &&
+        settings.notifyDuplicateAlerts &&
+        dupWarning &&
+        !updatedInvoice.duplicateWarning
+      ) {
+        appendNotification({
+          title: `Duplicate warning: ${finalInvoice.invoiceNumber}`,
+          detail: dupWarning,
+          targetRoute: 'review',
+          targetInvoiceId: finalInvoice.id,
+          category: 'duplicate',
+        });
+      }
     },
-    [appendActivity]
+    [
+      appendActivity,
+      appendNotification,
+      settings.enableDuplicateWarnings,
+      settings.notifyDuplicateAlerts,
+      settings.notifyFlaggedInvoices,
+    ]
   );
 
   const updateInvoiceStatus = useCallback(
@@ -203,9 +451,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
                 ? 'warning'
                 : 'neutral',
         });
+
+        if (status === 'Flagged' && settings.notifyFlaggedInvoices) {
+          appendNotification({
+            title: `Invoice flagged: ${targetNumber}`,
+            detail: reason ?? 'Flagged for secondary verification.',
+            targetRoute: 'review',
+            targetInvoiceId: invoiceId,
+            category: 'flagged',
+          });
+        }
       }
     },
-    [appendActivity]
+    [appendActivity, appendNotification, settings.notifyFlaggedInvoices]
   );
 
   const updateSettings = useCallback((nextSettings: WorkspaceSettings) => {
@@ -223,14 +481,26 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const resetDemoWorkspace = useCallback(() => {
+    const revoked = revokeAllBlobUrls(invoicesRef.current);
+    for (const url of revoked) {
+      createdBlobUrlsRef.current.delete(url);
+    }
     clearAllDemoStorage();
+    invoicesRef.current = INITIAL_INVOICES;
     setInvoices(INITIAL_INVOICES);
     setSettings(INITIAL_SETTINGS);
     setActivities(INITIAL_ACTIVITIES);
     setNotifications(INITIAL_NOTIFICATIONS);
     setSelectedInvoiceId(INITIAL_INVOICES[0].id);
     setSupplierFilterId(null);
+    setHasUnsavedReviewChanges(false);
+    setPendingNavigation(null);
   }, []);
+
+  const visibleNotifications = useMemo(
+    () => filterNotificationsBySettings(notifications, settings),
+    [notifications, settings]
+  );
 
   const value = useMemo<WorkspaceContextValue>(
     () => ({
@@ -239,13 +509,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       invoices,
       suppliers,
       activities,
-      notifications,
+      notifications: visibleNotifications,
       settings,
       selectedInvoiceId,
       selectInvoiceForReview,
+      hasUnsavedReviewChanges,
+      setHasUnsavedReviewChanges,
+      pendingNavigation,
+      cancelPendingNavigation,
+      commitPendingNavigation,
       supplierFilterId,
       clearSupplierFilter,
       addUploadedInvoice,
+      deleteLocalInvoice,
       updateInvoice,
       updateInvoiceStatus,
       updateSettings,
@@ -259,13 +535,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       invoices,
       suppliers,
       activities,
-      notifications,
+      visibleNotifications,
       settings,
       selectedInvoiceId,
       selectInvoiceForReview,
+      hasUnsavedReviewChanges,
+      pendingNavigation,
+      cancelPendingNavigation,
+      commitPendingNavigation,
       supplierFilterId,
       clearSupplierFilter,
       addUploadedInvoice,
+      deleteLocalInvoice,
       updateInvoice,
       updateInvoiceStatus,
       updateSettings,

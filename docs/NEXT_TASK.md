@@ -1,10 +1,13 @@
 # NEXT_TASK — Exact Next Recommended Development Task
 
-## Task 002: Backend Foundation (Python FastAPI + PostgreSQL + Workspace API)
+## Immediate Pre-Task Release Sync
 
-Do not begin Task 002 until Task 001 has been reviewed and approved.
+1. Push the verified frontend changes and `.github/workflows/ci.yml` to branch `task-001-2-remediation` (confirming `bun.lock` is not committed).
+2. Verify the GitHub Actions **Frontend CI** workflow (`npm ci`, `npm run lint`, `npm test`, `npm run build`) passes on `task-001-2-remediation` and open/merge the PR to `main`.
 
-### Scope for Task 002
+---
+
+## Next Development Milestone: Task 002 — Backend Foundation (Python FastAPI + PostgreSQL)
 
 1. **Initialize Backend Service (`/backend`)**
    - Set up Python FastAPI application structure with Pydantic v2 schemas matching `src/types/domain.ts`.
@@ -14,10 +17,9 @@ Do not begin Task 002 until Task 001 has been reviewed and approved.
    - Enforce `workspace_id` multi-tenant scoping on all queries.
 3. **REST API Endpoints**
    - `GET /api/v1/invoices`, `GET /api/v1/invoices/{id}`, `PATCH /api/v1/invoices/{id}`
-   - `POST /api/v1/invoices/upload` (store original PDF/image in local dev object storage or S3-compatible bucket and stage as `Pending Review`)
-   - `POST /api/v1/invoices/{id}/verify` and `POST /api/v1/invoices/{id}/flag`
-   - `GET /api/v1/suppliers`, `GET /api/v1/reports/summary`, `GET /api/v1/reports/export.csv`
+   - `POST /api/v1/invoices/upload`, `POST /api/v1/invoices/{id}/verify`, `POST /api/v1/invoices/{id}/flag`
+   - `DELETE /api/v1/invoices/{id}` (staging drafts), `GET /api/v1/suppliers`, `GET /api/v1/reports/summary`, `GET /api/v1/reports/export.csv`
 4. **Frontend API Client Adapter**
-   - Replace `src/data/mockData.ts` / `localStorage` calls inside `WorkspaceContext` with typed API client calls while preserving the exact UI and human-review workflow.
-5. **Automated Backend Tests**
-   - Add `pytest` unit and integration tests for GST arithmetic validation, duplicate warning detection, and status transition audit logging.
+   - Add async loading/error states and API adapter calls inside `WorkspaceContext` while preserving the mandatory human-review gate and verification mismatch safety checks.
+
+

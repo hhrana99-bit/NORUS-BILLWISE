@@ -91,6 +91,8 @@ export interface ActivityEvent {
   tone: 'neutral' | 'success' | 'warning';
 }
 
+export type NotificationCategory = 'flagged' | 'duplicate' | 'digest';
+
 export interface NotificationItem {
   id: string;
   title: string;
@@ -99,6 +101,7 @@ export interface NotificationItem {
   read: boolean;
   targetRoute: AppRoute;
   targetInvoiceId?: string;
+  category?: NotificationCategory;
 }
 
 export interface WorkspaceSettings {

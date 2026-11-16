@@ -1,4 +1,3 @@
-import { HISTORICAL_MONTH_BASELINES } from '../data/mockData';
 import type { HistoricalMonthStat, Invoice } from '../types/domain';
 import { getTotalTax } from './formatters';
 
@@ -50,36 +49,157 @@ export function computeReportMetrics(invoices: Invoice[]): ReportMetrics {
   };
 }
 
-export function buildMonthlyTrendStats(invoices: Invoice[]): HistoricalMonthStat[] {
-  const aggregateMonth = (monthKey: string, label: string): HistoricalMonthStat => {
-    const monthInvoices = invoices.filter((inv) => inv.invoiceDate.startsWith(monthKey));
-    return {
+const SHORT_MONTH_NAMES = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+] as const;
+
+export interface ParsedYearMonth {
+  year: number;
+  month: number;
+  monthKey: string;
+}
+
+export function parseIsoYearMonth(isoDate: string): ParsedYearMonth | null {
+  if (typeof isoDate !== 'string') return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate.trim());
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  if (year < 1970 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+
+  const utc = new Date(Date.UTC(year, month - 1, day));
+  if (
+    utc.getUTCFullYear() !== year ||
+    utc.getUTCMonth() !== month - 1 ||
+    utc.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return {
+    year,
+    month,
+    monthKey: `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`,
+  };
+}
+
+function formatMonthLabel(year: number, month: number): string {
+  const shortYear = String(year).slice(-2);
+  return `${SHORT_MONTH_NAMES[month - 1]} ${shortYear}`;
+}
+
+function toMonthIndex(year: number, month: number): number {
+  return year * 12 + (month - 1);
+}
+
+function fromMonthIndex(index: number): { year: number; month: number; monthKey: string } {
+  const year = Math.floor(index / 12);
+  const month = (index % 12) + 1;
+  return {
+    year,
+    month,
+    monthKey: `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}`,
+  };
+}
+
+export type TrendWindowOption = number | 'all';
+
+export function buildMonthlyTrendStats(
+  invoices: Invoice[],
+  options: { windowMonths?: TrendWindowOption } = {}
+): HistoricalMonthStat[] {
+  const buckets = new Map<string, Invoice[]>();
+  let minIndex = Infinity;
+  let maxIndex = -Infinity;
+
+  for (const inv of invoices) {
+    const parsed = parseIsoYearMonth(inv.invoiceDate);
+    if (!parsed) continue;
+    const idx = toMonthIndex(parsed.year, parsed.month);
+    if (idx < minIndex) minIndex = idx;
+    if (idx > maxIndex) maxIndex = idx;
+
+    const list = buckets.get(parsed.monthKey);
+    if (list) {
+      list.push(inv);
+    } else {
+      buckets.set(parsed.monthKey, [inv]);
+    }
+  }
+
+  if (buckets.size === 0 || !Number.isFinite(maxIndex)) {
+    return [];
+  }
+
+  const windowOption = options.windowMonths ?? 6;
+  const startIndex =
+    windowOption === 'all'
+      ? minIndex
+      : maxIndex - Math.max(1, Math.floor(windowOption)) + 1;
+
+  const stats: HistoricalMonthStat[] = [];
+  for (let idx = startIndex; idx <= maxIndex; idx += 1) {
+    const { year, month, monthKey } = fromMonthIndex(idx);
+    const monthInvoices = buckets.get(monthKey) ?? [];
+    stats.push({
       monthKey,
-      label,
+      label: formatMonthLabel(year, month),
       totalCount: monthInvoices.length,
       verifiedCount: monthInvoices.filter((i) => i.status === 'Verified').length,
       pendingCount: monthInvoices.filter((i) => i.status === 'Pending Review').length,
       flaggedCount: monthInvoices.filter((i) => i.status === 'Flagged').length,
       totalValue: monthInvoices.reduce((sum, i) => sum + i.totalAmount, 0),
-    };
-  };
+    });
+  }
 
-  return [
-    ...HISTORICAL_MONTH_BASELINES,
-    aggregateMonth('2026-10', 'Oct 26'),
-    aggregateMonth('2026-11', 'Nov 26'),
-  ];
+  return stats;
 }
 
-function escapeCsvCell(value: string | number): string {
-  const str = String(value);
-  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+const FORMULA_PREFIX_PATTERN = /^[=+\-@\t\r]/;
+
+export function sanitizeCsvCell(value: string | number): string {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : '0';
+  }
+
+  let str = String(value);
+  if (FORMULA_PREFIX_PATTERN.test(str)) {
+    str = `'${str}`;
+  }
+
+  if (
+    str.includes(',') ||
+    str.includes('"') ||
+    str.includes('\n') ||
+    str.includes('\r')
+  ) {
     return `"${str.replace(/"/g, '""')}"`;
   }
+
   return str;
 }
 
-export function exportInvoicesToCsv(invoices: Invoice[], workspaceName: string): void {
+function formatCsvAmount(amount: number): string {
+  return Number.isFinite(amount) ? amount.toFixed(2) : '0.00';
+}
+
+export function buildInvoicesCsv(invoices: Invoice[], workspaceName: string): string {
   const headers = [
     'Workspace',
     'Invoice Number',
@@ -98,27 +218,30 @@ export function exportInvoicesToCsv(invoices: Invoice[], workspaceName: string):
   ];
 
   const rows = invoices.map((inv) => [
-    workspaceName,
-    inv.invoiceNumber,
-    inv.supplierName,
-    inv.supplierGstin,
-    inv.invoiceDate,
-    inv.uploadDate,
-    inv.taxableAmount.toFixed(2),
-    inv.cgst.toFixed(2),
-    inv.sgst.toFixed(2),
-    inv.igst.toFixed(2),
-    getTotalTax(inv).toFixed(2),
-    inv.totalAmount.toFixed(2),
-    inv.status,
-    inv.reviewerNote,
+    sanitizeCsvCell(workspaceName),
+    sanitizeCsvCell(inv.invoiceNumber),
+    sanitizeCsvCell(inv.supplierName),
+    sanitizeCsvCell(inv.supplierGstin),
+    sanitizeCsvCell(inv.invoiceDate),
+    sanitizeCsvCell(inv.uploadDate),
+    formatCsvAmount(inv.taxableAmount),
+    formatCsvAmount(inv.cgst),
+    formatCsvAmount(inv.sgst),
+    formatCsvAmount(inv.igst),
+    formatCsvAmount(getTotalTax(inv)),
+    formatCsvAmount(inv.totalAmount),
+    sanitizeCsvCell(inv.status),
+    sanitizeCsvCell(inv.reviewerNote),
   ]);
 
-  const csvContent = [
-    headers.map(escapeCsvCell).join(','),
-    ...rows.map((row) => row.map(escapeCsvCell).join(',')),
+  return [
+    headers.map((h) => sanitizeCsvCell(h)).join(','),
+    ...rows.map((row) => row.join(',')),
   ].join('\n');
+}
 
+export function exportInvoicesToCsv(invoices: Invoice[], workspaceName: string): void {
+  const csvContent = buildInvoicesCsv(invoices, workspaceName);
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');

@@ -4,12 +4,14 @@ import {
   FileText,
   Filter,
   Search,
+  Trash2,
   Upload,
   X,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { StatusBadge } from '../components/common/Badge';
 import { Card } from '../components/common/Card';
+import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { EmptyState } from '../components/common/EmptyState';
 import { UploadInvoiceModal } from '../components/invoices/UploadInvoiceModal';
 import { formatDateIN, formatINR, getTotalTax } from '../services/formatters';
@@ -19,7 +21,7 @@ import {
   type SortDirection,
 } from '../services/invoiceService';
 import { useWorkspace } from '../state/WorkspaceContext';
-import type { InvoiceStatus } from '../types/domain';
+import type { Invoice, InvoiceStatus } from '../types/domain';
 
 export function InvoicesPage() {
   const {
@@ -28,6 +30,7 @@ export function InvoicesPage() {
     supplierFilterId,
     clearSupplierFilter,
     selectInvoiceForReview,
+    deleteLocalInvoice,
   } = useWorkspace();
 
   const [search, setSearch] = useState('');
@@ -38,6 +41,7 @@ export function InvoicesPage() {
   const [sortField, setSortField] = useState<InvoiceSortField>('invoiceDate');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<Invoice | null>(null);
 
   const activeSupplierName = supplierFilterId
     ? suppliers.find((s) => s.id === supplierFilterId)?.name
@@ -52,6 +56,7 @@ export function InvoicesPage() {
           status: statusFilter,
           taxType: taxTypeFilter,
           supplierId: supplierFilterId ?? undefined,
+          supplierName: activeSupplierName,
         },
         sortField,
         sortDirection
@@ -62,6 +67,7 @@ export function InvoicesPage() {
       statusFilter,
       taxTypeFilter,
       supplierFilterId,
+      activeSupplierName,
       sortField,
       sortDirection,
     ]
@@ -121,7 +127,7 @@ export function InvoicesPage() {
 
       <Card>
         <div className="flex flex-col gap-3 border-b border-slate-100 p-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="relative max-w-md flex-1">
+          <div className="relative w-full max-w-md flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
@@ -143,7 +149,7 @@ export function InvoicesPage() {
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value as 'All' | InvoiceStatus)}
               aria-label="Filter by status"
-              className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 focus:border-indigo-500 focus:outline-none"
+              className="h-10 w-full min-w-0 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 focus:border-indigo-500 focus:outline-none sm:w-auto"
             >
               <option value="All">All Statuses</option>
               <option value="Pending Review">Pending Review</option>
@@ -162,7 +168,7 @@ export function InvoicesPage() {
                 )
               }
               aria-label="Filter by GST tax type"
-              className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 focus:border-indigo-500 focus:outline-none"
+              className="h-10 w-full min-w-0 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 focus:border-indigo-500 focus:outline-none sm:w-auto"
             >
               <option value="All">All GST Types</option>
               <option value="Intra-State (CGST+SGST)">Intra-State (CGST+SGST)</option>
@@ -174,10 +180,10 @@ export function InvoicesPage() {
                 type="button"
                 onClick={clearSupplierFilter}
                 aria-label="Clear supplier filter"
-                className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-medium text-indigo-700 hover:bg-indigo-100 whitespace-nowrap"
+                className="inline-flex h-10 max-w-full items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
               >
-                <span>Supplier: {activeSupplierName}</span>
-                <X className="h-3.5 w-3.5" />
+                <span className="truncate">Supplier: {activeSupplierName}</span>
+                <X className="h-3.5 w-3.5 shrink-0" />
               </button>
             )}
           </div>
@@ -265,22 +271,46 @@ export function InvoicesPage() {
                       </td>
                       <td className="px-5 py-3.5">
                         <StatusBadge status={inv.status} />
+                        {inv.status === 'Flagged' && inv.flagReason && (
+                          <p
+                            title={inv.flagReason}
+                            className="mt-1 max-w-[220px] truncate text-[11px] text-rose-700"
+                          >
+                            {inv.flagReason}
+                          </p>
+                        )}
                       </td>
                       <td className="px-5 py-3.5 font-mono text-slate-500 tabular-nums whitespace-nowrap">
                         {formatDateIN(inv.uploadDate)}
                       </td>
                       <td className="px-5 py-3.5 text-right">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            selectInvoiceForReview(inv.id);
-                          }}
-                          className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-indigo-300 hover:text-indigo-700 whitespace-nowrap"
-                        >
-                          <Eye className="h-3.5 w-3.5" />
-                          Review
-                        </button>
+                        <div className="inline-flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              selectInvoiceForReview(inv.id);
+                            }}
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-indigo-300 hover:text-indigo-700 whitespace-nowrap"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            Review
+                          </button>
+                          {inv.isLocalUpload && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPendingDelete(inv);
+                              }}
+                              aria-label={`Delete locally staged invoice ${inv.invoiceNumber}`}
+                              title="Delete locally staged demo invoice"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-rose-600 hover:border-rose-200 hover:bg-rose-50"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -307,6 +337,33 @@ export function InvoicesPage() {
       </Card>
 
       <UploadInvoiceModal open={uploadOpen} onClose={() => setUploadOpen(false)} />
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        tone="danger"
+        title="Delete Locally Staged Demo Invoice?"
+        description={
+          pendingDelete ? (
+            <p>
+              Remove locally staged invoice{' '}
+              <span className="font-mono font-semibold text-slate-900">
+                {pendingDelete.invoiceNumber}
+              </span>{' '}
+              ({pendingDelete.documentFileName}) from your browser workspace and
+              clean up its temporary preview URL? No server document is deleted.
+            </p>
+          ) : null
+        }
+        cancelLabel="Keep Invoice"
+        confirmLabel="Delete Local Invoice"
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          if (pendingDelete) {
+            deleteLocalInvoice(pendingDelete.id);
+          }
+          setPendingDelete(null);
+        }}
+      />
     </div>
   );
 }

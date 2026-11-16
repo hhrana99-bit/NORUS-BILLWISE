@@ -1,5 +1,12 @@
 import { FileUp, Info, Upload, X } from 'lucide-react';
-import { useRef, useState, type ChangeEvent, type DragEvent, type FormEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+  type FormEvent,
+} from 'react';
 import { createDemoUploadedInvoice } from '../../services/invoiceService';
 import { useWorkspace } from '../../state/WorkspaceContext';
 
@@ -12,14 +19,29 @@ export function UploadInvoiceModal({
   open: boolean;
   onClose: () => void;
 }) {
-  const { addUploadedInvoice, selectInvoiceForReview } = useWorkspace();
+  const { suppliers, addUploadedInvoice, selectInvoiceForReview } = useWorkspace();
   const inputRef = useRef<HTMLInputElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [supplierName, setSupplierName] = useState('');
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [isDragging, setIsDragging] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    closeButtonRef.current?.focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -56,6 +78,7 @@ export function UploadInvoiceModal({
       previewUrl,
       supplierName,
       invoiceNumber,
+      suppliers,
     });
 
     addUploadedInvoice(created);
@@ -68,15 +91,20 @@ export function UploadInvoiceModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-3 sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="upload-modal-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          onClose();
+        }
+      }}
     >
-      <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white shadow-xl">
-        <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
+      <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl">
+        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4 sm:px-6">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
               <Upload className="h-4 w-4" />
             </div>
             <div>
@@ -89,16 +117,17 @@ export function UploadInvoiceModal({
             </div>
           </div>
           <button
+            ref={closeButtonRef}
             type="button"
             onClick={onClose}
-            className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
             aria-label="Close modal"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4 p-6">
+        <form onSubmit={handleSubmit} className="space-y-4 p-5 sm:p-6">
           <div className="flex items-start gap-2.5 rounded-lg border border-indigo-200 bg-indigo-50/60 p-3 text-xs text-indigo-950">
             <Info className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
             <p className="leading-relaxed">
@@ -109,6 +138,15 @@ export function UploadInvoiceModal({
           </div>
 
           <div
+            role="button"
+            tabIndex={0}
+            aria-label="Choose a PDF or image file to stage locally"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                inputRef.current?.click();
+              }
+            }}
             onDragOver={(e) => {
               e.preventDefault();
               setIsDragging(true);
@@ -116,7 +154,7 @@ export function UploadInvoiceModal({
             onDragLeave={() => setIsDragging(false)}
             onDrop={handleDrop}
             onClick={() => inputRef.current?.click()}
-            className={`cursor-pointer rounded-xl border-2 border-dashed p-6 text-center transition-colors ${
+            className={`cursor-pointer rounded-xl border-2 border-dashed p-5 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 sm:p-6 ${
               isDragging
                 ? 'border-indigo-500 bg-indigo-50/50'
                 : 'border-slate-300 bg-slate-50/60 hover:border-indigo-400 hover:bg-slate-50'
@@ -132,8 +170,10 @@ export function UploadInvoiceModal({
             <FileUp className="mx-auto h-8 w-8 text-slate-400" />
             {selectedFile ? (
               <div className="mt-3">
-                <p className="text-sm font-medium text-slate-900">{selectedFile.name}</p>
-                <p className="mt-0.5 text-xs text-slate-500 font-mono tabular-nums">
+                <p className="break-all text-sm font-medium text-slate-900">
+                  {selectedFile.name}
+                </p>
+                <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums">
                   {(selectedFile.size / 1024).toFixed(1)} KB · Ready to stage locally
                 </p>
               </div>
@@ -156,11 +196,17 @@ export function UploadInvoiceModal({
               </label>
               <input
                 type="text"
+                list="known-suppliers-list"
                 value={supplierName}
                 onChange={(e) => setSupplierName(e.target.value)}
                 placeholder="e.g. Sample Logistics LLP"
                 className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 text-xs focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
               />
+              <datalist id="known-suppliers-list">
+                {suppliers.map((sup) => (
+                  <option key={sup.id} value={sup.name} />
+                ))}
+              </datalist>
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-700">
@@ -180,7 +226,7 @@ export function UploadInvoiceModal({
             <p className="text-xs font-medium text-rose-600">{errorMsg}</p>
           )}
 
-          <div className="flex items-center justify-end gap-2.5 pt-2">
+          <div className="flex flex-wrap items-center justify-end gap-2.5 pt-2">
             <button
               type="button"
               onClick={onClose}

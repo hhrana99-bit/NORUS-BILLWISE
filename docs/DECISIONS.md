@@ -19,3 +19,29 @@
 ## ADR-005: Advisory-Only Duplicate Warnings
 - **Decision:** Surface potential duplicate invoices (e.g., `VCS-2026-884`) as amber advisory banners in the Review Centre rather than blocking or rejecting records.
 - **Rationale:** Recurring monthly retainers with identical amounts are common in accounting practices and require CA confirmation, not silent rejection.
+
+## ADR-006: WorkspaceContext-Mediated Unsaved Review Guard
+- **Decision:** Track `hasUnsavedReviewChanges` and `pendingNavigation` inside `WorkspaceContext` while coordinating `ReviewCentrePage` commit/discard handlers and `beforeunload`.
+- **Rationale:** Protects both internal invoice switcher transitions and top-bar/sidebar route navigation without coupling layout components directly to form draft state.
+
+## ADR-007: Verification Arithmetic Safety Gate
+- **Decision:** Prevent silent verification when `computeArithmeticCheck` detects a discrepancy (`Taxable + CGST + SGST + IGST !== Total`), requiring an explicit confirmation dialog while preserving exact figures.
+- **Rationale:** Prevents accidental approval of out-of-balance GST bills without silently mutating accounting numbers.
+
+## ADR-008: Dynamic Chronological Monthly Reporting Windows
+- **Decision:** Remove hardcoded baseline month buckets and generate monthly trend series dynamically from valid `YYYY-MM-DD` invoice dates across `6M`, `12M`, or `All` windows, zero-filling empty intermediate months.
+- **Rationale:** Keeps Reports accurate as new demo/staged invoices across arbitrary dates are added or deleted.
+
+## ADR-009: Reference-Tracked Object URL Lifecycle Cleanup
+- **Decision:** Manage `blob:` URL revocation via `src/services/objectUrlService.ts` and a `createdBlobUrlsRef` set in `WorkspaceContext` across deletion, update replacement, workspace reset, and provider unmount.
+- **Rationale:** Eliminates browser memory leaks while staying safe under React 19 StrictMode mount/unmount checks.
+
+## ADR-010: Route-Level Code Splitting with React.lazy
+- **Decision:** Split the 6 primary pages via `React.lazy` and `Suspense` in `src/App.tsx` and use `fileURLToPath(import.meta.url)` in `vite.config.ts`.
+- **Rationale:** Eliminates Vite 8 ESM `__dirname` warnings and keeps the initial entry chunk lightweight.
+
+## ADR-011: Same-Invoice Effect Isolation & Automated CI Gate
+- **Decision:** Scope `ReviewCentrePage` banner/modal reset exclusively to `currentInvoice.id` transitions (`prevInvoiceIdRef`), derive active draft synchronously across invoice switches, and enforce `npm ci`, `npm run lint`, `npm test`, and `npm run build` in `.github/workflows/ci.yml`.
+- **Rationale:** Prevents `updateInvoice` state refreshes from erasing human action feedback banners while guaranteeing repeatable frontend build/test verification on `main` and `task-001-2-remediation`.
+
+

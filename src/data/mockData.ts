@@ -512,6 +512,7 @@ export const INITIAL_NOTIFICATIONS: NotificationItem[] = [
     read: false,
     targetRoute: 'review',
     targetInvoiceId: 'inv-1039',
+    category: 'flagged',
   },
   {
     id: 'notif-2',
@@ -521,14 +522,16 @@ export const INITIAL_NOTIFICATIONS: NotificationItem[] = [
     read: false,
     targetRoute: 'review',
     targetInvoiceId: 'inv-1040',
+    category: 'duplicate',
   },
   {
     id: 'notif-3',
-    title: 'Supplier GSTIN verification pending',
-    detail: 'Kaveri Paper & Print Solutions requires GSTIN check on KPP-TN-071.',
+    title: 'Daily review queue digest',
+    detail: '4 pending & 2 flagged invoices in sample queue awaiting CA sign-off.',
     timeLabel: '1d ago',
     read: true,
-    targetRoute: 'suppliers',
+    targetRoute: 'review',
+    category: 'digest',
   },
 ];
 

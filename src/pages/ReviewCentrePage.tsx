@@ -1,16 +1,25 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  FileText,
   Flag,
   Info,
   Save,
   ShieldAlert,
+  Trash2,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { StatusBadge } from '../components/common/Badge';
+import { ConfirmDialog } from '../components/common/ConfirmDialog';
+import { EmptyState } from '../components/common/EmptyState';
 import { DocumentPreview } from '../components/invoices/DocumentPreview';
+import { FlagInvoiceModal } from '../components/invoices/FlagInvoiceModal';
 import { formatINR } from '../services/formatters';
-import { computeArithmeticCheck } from '../services/invoiceService';
+import {
+  computeArithmeticCheck,
+  detectDuplicateWarning,
+  hasUnsavedInvoiceChanges,
+} from '../services/invoiceService';
 import { useWorkspace } from '../state/WorkspaceContext';
 import type {
   FieldVerificationStatus,
@@ -21,42 +30,113 @@ import type {
 export function ReviewCentrePage() {
   const {
     invoices,
+    settings,
     selectedInvoiceId,
     selectInvoiceForReview,
+    setHasUnsavedReviewChanges,
+    pendingNavigation,
+    cancelPendingNavigation,
+    commitPendingNavigation,
     updateInvoice,
+    deleteLocalInvoice,
+    navigate,
   } = useWorkspace();
 
   const currentInvoice =
     invoices.find((inv) => inv.id === selectedInvoiceId) ?? invoices[0];
 
-  const [draft, setDraft] = useState<Invoice>(currentInvoice);
+  const [draftState, setDraft] = useState<Invoice | undefined>(currentInvoice);
   const [focusedField, setFocusedField] = useState<InvoiceFieldKey | null>(null);
   const [feedbackBanner, setFeedbackBanner] = useState<string>('');
-  const [dirty, setDirty] = useState(false);
+  const [flagModalOpen, setFlagModalOpen] = useState(false);
+  const [verifyMismatchOpen, setVerifyMismatchOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const prevInvoiceIdRef = useRef<string | undefined>(currentInvoice?.id);
+  const suppressBannerClearRef = useRef(false);
+
+  const draft =
+    draftState && currentInvoice && draftState.id === currentInvoice.id
+      ? draftState
+      : currentInvoice;
 
   useEffect(() => {
-    if (currentInvoice) {
-      setDraft(currentInvoice);
-      setDirty(false);
-      setFeedbackBanner('');
+    const prevId = prevInvoiceIdRef.current;
+    const nextId = currentInvoice?.id;
+    setDraft(currentInvoice);
+
+    if (prevId !== nextId) {
+      prevInvoiceIdRef.current = nextId;
+      if (suppressBannerClearRef.current) {
+        suppressBannerClearRef.current = false;
+      } else {
+        setFeedbackBanner('');
+      }
+      setFlagModalOpen(false);
+      setVerifyMismatchOpen(false);
+      setDeleteDialogOpen(false);
     }
   }, [currentInvoice]);
 
+  const hasUnsavedChanges = hasUnsavedInvoiceChanges(currentInvoice, draft);
+
+  useEffect(() => {
+    setHasUnsavedReviewChanges(hasUnsavedChanges);
+  }, [hasUnsavedChanges, setHasUnsavedReviewChanges]);
+
+  useEffect(() => {
+    return () => {
+      setHasUnsavedReviewChanges(false);
+    };
+  }, [setHasUnsavedReviewChanges]);
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [hasUnsavedChanges]);
+
   if (!draft) {
-    return null;
+    return (
+      <div className="rounded-xl border border-slate-200 bg-white">
+        <EmptyState
+          icon={<FileText className="h-5 w-5" />}
+          title="No invoices available to review"
+          description="Upload a sample PDF or image in Invoices, or restore the demo register from Settings."
+          action={
+            <button
+              type="button"
+              onClick={() => navigate('invoices')}
+              className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
+            >
+              Go to Invoices
+            </button>
+          }
+        />
+      </div>
+    );
   }
 
   const check = computeArithmeticCheck(draft);
+  const activeDuplicateWarning = settings.enableDuplicateWarnings
+    ? detectDuplicateWarning(draft, invoices)
+    : undefined;
 
   const updateTextField = (
     key: 'supplierName' | 'supplierGstin' | 'invoiceNumber' | 'invoiceDate',
     value: string
   ) => {
-    setDirty(true);
-    setDraft((prev) => ({
-      ...prev,
-      [key]: value,
-    }));
+    setDraft((prev) =>
+      prev
+        ? {
+            ...prev,
+            [key]: value,
+          }
+        : prev
+    );
   };
 
   const updateNumericField = (
@@ -65,34 +145,39 @@ export function ReviewCentrePage() {
   ) => {
     const parsed = rawValue === '' ? 0 : Number(rawValue);
     if (Number.isNaN(parsed)) return;
-    setDirty(true);
-    setDraft((prev) => ({
-      ...prev,
-      [key]: parsed,
-    }));
+    setDraft((prev) =>
+      prev
+        ? {
+            ...prev,
+            [key]: parsed,
+          }
+        : prev
+    );
   };
 
   const setFieldStatus = (key: InvoiceFieldKey, status: FieldVerificationStatus) => {
-    setDirty(true);
-    setDraft((prev) => ({
-      ...prev,
-      fieldMeta: {
-        ...prev.fieldMeta,
-        [key]: {
-          ...prev.fieldMeta[key],
-          status,
-        },
-      },
-    }));
+    setDraft((prev) =>
+      prev
+        ? {
+            ...prev,
+            fieldMeta: {
+              ...prev.fieldMeta,
+              [key]: {
+                ...prev.fieldMeta[key],
+                status,
+              },
+            },
+          }
+        : prev
+    );
   };
 
   const handleSaveChanges = () => {
     updateInvoice(draft, 'Saved manual edits in Review Centre');
-    setDirty(false);
     setFeedbackBanner('Changes saved to local prototype state.');
   };
 
-  const handleVerify = () => {
+  const executeVerify = (confirmedWithMismatch: boolean) => {
     const nextFieldMeta = { ...draft.fieldMeta };
     (Object.keys(nextFieldMeta) as InvoiceFieldKey[]).forEach((key) => {
       nextFieldMeta[key] = { ...nextFieldMeta[key], status: 'Verified' };
@@ -105,18 +190,29 @@ export function ReviewCentrePage() {
       fieldMeta: nextFieldMeta,
     };
     setDraft(verifiedInvoice);
-    updateInvoice(verifiedInvoice, 'Marked invoice as Verified after human review');
-    setDirty(false);
-    setFeedbackBanner('Invoice marked as Verified. Dashboard and Reports updated.');
+    updateInvoice(
+      verifiedInvoice,
+      confirmedWithMismatch
+        ? `Marked invoice as Verified after human confirmation despite ${formatINR(Math.abs(check.difference))} variance`
+        : 'Marked invoice as Verified after human review'
+    );
+    setVerifyMismatchOpen(false);
+    setFeedbackBanner(
+      confirmedWithMismatch
+        ? 'Invoice verified with explicit human confirmation of variance. Amounts left unchanged.'
+        : 'Invoice marked as Verified. Dashboard and Reports updated.'
+    );
   };
 
-  const handleFlag = () => {
-    const reason =
-      draft.flagReason?.trim() ||
-      (!check.isBalanced
-        ? `Tax + taxable total mismatch of ${formatINR(Math.abs(check.difference))}`
-        : 'Flagged by reviewer for secondary verification');
+  const handleVerifyClick = () => {
+    if (!check.isBalanced) {
+      setVerifyMismatchOpen(true);
+      return;
+    }
+    executeVerify(false);
+  };
 
+  const handleConfirmFlag = (reason: string) => {
     const flaggedInvoice: Invoice = {
       ...draft,
       status: 'Flagged',
@@ -124,8 +220,22 @@ export function ReviewCentrePage() {
     };
     setDraft(flaggedInvoice);
     updateInvoice(flaggedInvoice, `Flagged invoice for review: ${reason}`);
-    setDirty(false);
+    setFlagModalOpen(false);
     setFeedbackBanner('Invoice flagged for review.');
+  };
+
+  const handleConfirmDeleteLocal = () => {
+    const deletedNumber = draft.invoiceNumber;
+    setDeleteDialogOpen(false);
+    suppressBannerClearRef.current = true;
+    const removed = deleteLocalInvoice(draft.id);
+    if (removed) {
+      setFeedbackBanner(
+        `Locally staged demo invoice ${deletedNumber} was removed from browser state.`
+      );
+    } else {
+      suppressBannerClearRef.current = false;
+    }
   };
 
   const renderFieldStatusControl = (fieldKey: InvoiceFieldKey) => {
@@ -171,15 +281,19 @@ export function ReviewCentrePage() {
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="text-xs font-medium text-slate-600">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2.5 sm:gap-3">
+          <label
+            htmlFor="active-review-document-select"
+            className="text-xs font-medium text-slate-600 whitespace-nowrap"
+          >
             Active Document:
           </label>
           <select
+            id="active-review-document-select"
             value={draft.id}
             onChange={(e) => selectInvoiceForReview(e.target.value)}
             aria-label="Select invoice to review"
-            className="h-10 rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs font-semibold text-slate-900 focus:border-indigo-500 focus:outline-none"
+            className="h-10 w-full min-w-0 max-w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs font-semibold text-slate-900 focus:border-indigo-500 focus:outline-none sm:w-auto sm:max-w-md"
           >
             {invoices.map((inv) => (
               <option key={inv.id} value={inv.id}>
@@ -188,14 +302,25 @@ export function ReviewCentrePage() {
             ))}
           </select>
           <StatusBadge status={draft.status} />
-          {dirty && (
-            <span className="text-xs font-medium text-amber-600">
+          {hasUnsavedChanges && (
+            <span className="text-xs font-medium text-amber-600 whitespace-nowrap">
               Unsaved edits
             </span>
           )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {draft.isLocalUpload && (
+            <button
+              type="button"
+              onClick={() => setDeleteDialogOpen(true)}
+              aria-label={`Delete locally staged invoice ${draft.invoiceNumber}`}
+              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-rose-600 hover:border-rose-200 hover:bg-rose-50 whitespace-nowrap"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete Local Draft
+            </button>
+          )}
           <button
             type="button"
             onClick={handleSaveChanges}
@@ -206,7 +331,7 @@ export function ReviewCentrePage() {
           </button>
           <button
             type="button"
-            onClick={handleFlag}
+            onClick={() => setFlagModalOpen(true)}
             className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-4 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap"
           >
             <Flag className="h-3.5 w-3.5" />
@@ -214,7 +339,7 @@ export function ReviewCentrePage() {
           </button>
           <button
             type="button"
-            onClick={handleVerify}
+            onClick={handleVerifyClick}
             className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-emerald-600 px-4 text-xs font-semibold text-white hover:bg-emerald-700 whitespace-nowrap"
           >
             <CheckCircle2 className="h-3.5 w-3.5" />
@@ -224,28 +349,35 @@ export function ReviewCentrePage() {
       </div>
 
       {feedbackBanner && (
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-medium text-emerald-800">
+        <div
+          role="status"
+          className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-medium text-emerald-800"
+        >
           {feedbackBanner}
         </div>
       )}
 
-      {draft.duplicateWarning && (
+      {activeDuplicateWarning && (
         <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
           <div>
             <span className="font-semibold">Duplicate Warning (Advisory Only): </span>
-            <span>{draft.duplicateWarning}</span>
+            <span>{activeDuplicateWarning}</span>
           </div>
         </div>
       )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <div className="lg:col-span-6 lg:h-[760px]">
-          <DocumentPreview invoice={draft} focusedField={focusedField} />
+        <div className="h-[480px] sm:h-[580px] lg:col-span-6 lg:h-[760px]">
+          <DocumentPreview
+            invoice={draft}
+            focusedField={focusedField}
+            settings={settings}
+          />
         </div>
 
         <div className="space-y-5 lg:col-span-6">
-          <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
+          <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
             <div className="border-b border-slate-100 pb-3">
               <h2 className="text-sm font-semibold text-slate-900">
                 Supplier &amp; Invoice Metadata
@@ -257,7 +389,7 @@ export function ReviewCentrePage() {
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <label className="text-xs font-medium text-slate-700">
                     Supplier Name
                   </label>
@@ -275,7 +407,7 @@ export function ReviewCentrePage() {
               </div>
 
               <div className="sm:col-span-2">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <label className="text-xs font-medium text-slate-700">
                     Supplier GSTIN
                   </label>
@@ -293,7 +425,7 @@ export function ReviewCentrePage() {
               </div>
 
               <div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <label className="text-xs font-medium text-slate-700">
                     Invoice Number
                   </label>
@@ -311,7 +443,7 @@ export function ReviewCentrePage() {
               </div>
 
               <div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <label className="text-xs font-medium text-slate-700">
                     Invoice Date
                   </label>
@@ -330,7 +462,7 @@ export function ReviewCentrePage() {
             </div>
           </div>
 
-          <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
+          <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
               <div>
                 <h2 className="text-sm font-semibold text-slate-900">
@@ -340,7 +472,16 @@ export function ReviewCentrePage() {
                   Live reconciliation check: Taxable + CGST + SGST + IGST
                 </p>
               </div>
-              {check.isBalanced ? (
+              {!settings.autoFlagTaxMismatch && check.isBalanced ? (
+                <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700">
+                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                  Totals Reconciled
+                </span>
+              ) : !settings.autoFlagTaxMismatch ? (
+                <span className="text-xs font-medium text-slate-500">
+                  Mismatch highlight disabled in Settings (verification still gated)
+                </span>
+              ) : check.isBalanced ? (
                 <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700">
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
                   Totals Reconciled
@@ -355,7 +496,7 @@ export function ReviewCentrePage() {
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <label className="text-xs font-medium text-slate-700">
                     Taxable Amount (₹)
                   </label>
@@ -374,7 +515,7 @@ export function ReviewCentrePage() {
               </div>
 
               <div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <label className="text-xs font-medium text-slate-700">CGST (₹)</label>
                   {renderFieldStatusControl('cgst')}
                 </div>
@@ -391,7 +532,7 @@ export function ReviewCentrePage() {
               </div>
 
               <div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <label className="text-xs font-medium text-slate-700">SGST (₹)</label>
                   {renderFieldStatusControl('sgst')}
                 </div>
@@ -408,7 +549,7 @@ export function ReviewCentrePage() {
               </div>
 
               <div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <label className="text-xs font-medium text-slate-700">IGST (₹)</label>
                   {renderFieldStatusControl('igst')}
                 </div>
@@ -425,7 +566,7 @@ export function ReviewCentrePage() {
               </div>
 
               <div className="sm:col-span-2">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <label className="text-xs font-semibold text-slate-900">
                     Total Invoice Amount (₹)
                   </label>
@@ -439,7 +580,7 @@ export function ReviewCentrePage() {
                   onBlur={() => setFocusedField(null)}
                   onChange={(e) => updateNumericField('totalAmount', e.target.value)}
                   className={`mt-1.5 h-10 w-full rounded-lg border px-3 font-mono text-sm font-semibold tabular-nums focus:outline-none focus:ring-2 ${
-                    check.isBalanced
+                    !settings.autoFlagTaxMismatch || check.isBalanced
                       ? 'border-slate-200 text-slate-900 focus:border-indigo-500 focus:ring-indigo-500/15'
                       : 'border-rose-300 bg-rose-50/40 text-rose-900 focus:border-rose-500 focus:ring-rose-500/15'
                   }`}
@@ -462,10 +603,11 @@ export function ReviewCentrePage() {
               <textarea
                 rows={2}
                 value={draft.reviewerNote}
-                onChange={(e) => {
-                  setDirty(true);
-                  setDraft((prev) => ({ ...prev, reviewerNote: e.target.value }));
-                }}
+                onChange={(e) =>
+                  setDraft((prev) =>
+                    prev ? { ...prev, reviewerNote: e.target.value } : prev
+                  )
+                }
                 placeholder="Add accounting or GST verification notes..."
                 className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
               />
@@ -479,6 +621,92 @@ export function ReviewCentrePage() {
           </div>
         </div>
       </div>
+
+      <FlagInvoiceModal
+        open={flagModalOpen}
+        invoiceNumber={draft.invoiceNumber}
+        initialReason={draft.flagReason}
+        hasArithmeticMismatch={!check.isBalanced}
+        hasDuplicateWarning={Boolean(activeDuplicateWarning)}
+        onConfirm={handleConfirmFlag}
+        onClose={() => setFlagModalOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={verifyMismatchOpen}
+        tone="warning"
+        title="Arithmetic Mismatch — Confirm Verification"
+        description={
+          <div className="space-y-2">
+            <p>
+              This invoice cannot be verified silently because the stated total does
+              not match Taxable + GST:
+            </p>
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 font-mono text-[11px] text-amber-950 tabular-nums">
+              <p>Computed Sum: {formatINR(check.expectedTotal)}</p>
+              <p>Stated Total: {formatINR(draft.totalAmount)}</p>
+              <p className="font-semibold text-rose-700">
+                Variance: {formatINR(check.difference)}
+              </p>
+            </div>
+            <p>
+              Confirming will mark the invoice as Verified without altering any
+              financial values.
+            </p>
+          </div>
+        }
+        cancelLabel="Return to Editing"
+        confirmLabel="Verify Despite Mismatch"
+        onConfirm={() => executeVerify(true)}
+        onCancel={() => setVerifyMismatchOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={pendingNavigation !== null}
+        tone="warning"
+        title="Unsaved Invoice Changes"
+        description={
+          <p>
+            You have unsaved edits on{' '}
+            <span className="font-mono font-semibold text-slate-900">
+              {draft.invoiceNumber}
+            </span>
+            . Choose whether to save your edits, discard them, or continue editing.
+          </p>
+        }
+        cancelLabel="Continue Editing"
+        secondaryActionLabel="Discard Changes"
+        confirmLabel="Save & Continue"
+        onCancel={cancelPendingNavigation}
+        onSecondaryAction={() => {
+          setDraft(currentInvoice);
+          commitPendingNavigation();
+        }}
+        onConfirm={() => {
+          updateInvoice(draft, 'Saved manual edits in Review Centre');
+          commitPendingNavigation();
+        }}
+      />
+
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        tone="danger"
+        title="Delete Locally Staged Demo Invoice?"
+        description={
+          <p>
+            This will remove{' '}
+            <span className="font-mono font-semibold text-slate-900">
+              {draft.invoiceNumber}
+            </span>{' '}
+            from your local browser demo workspace and revoke its temporary file
+            preview URL. No server-side document is deleted.
+          </p>
+        }
+        cancelLabel="Keep Invoice"
+        confirmLabel="Delete Local Draft"
+        onConfirm={handleConfirmDeleteLocal}
+        onCancel={() => setDeleteDialogOpen(false)}
+      />
     </div>
   );
 }

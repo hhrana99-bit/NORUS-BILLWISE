@@ -1,4 +1,4 @@
-import { Check, Download, FileSpreadsheet } from 'lucide-react';
+import { BarChart3, Check, Download, FileSpreadsheet } from 'lucide-react';
 import { useState } from 'react';
 import { Card, CardHeader } from '../components/common/Card';
 import { formatINR, formatINRCompact } from '../services/formatters';
@@ -6,18 +6,27 @@ import {
   buildMonthlyTrendStats,
   computeReportMetrics,
   exportInvoicesToCsv,
+  type TrendWindowOption,
 } from '../services/reportService';
 import { useWorkspace } from '../state/WorkspaceContext';
 
 export function ReportsPage() {
   const { invoices, settings, selectInvoiceForReview } = useWorkspace();
   const [exportedMessage, setExportedMessage] = useState(false);
+  const [trendWindow, setTrendWindow] = useState<TrendWindowOption>(6);
 
   const metrics = computeReportMetrics(invoices);
-  const monthlyTrends = buildMonthlyTrendStats(invoices);
+  const monthlyTrends = buildMonthlyTrendStats(invoices, {
+    windowMonths: trendWindow,
+  });
   const flaggedList = invoices.filter((inv) => inv.status === 'Flagged');
 
   const maxMonthlyCount = Math.max(1, ...monthlyTrends.map((m) => m.totalCount));
+  const chartCountTotal = monthlyTrends.reduce((sum, m) => sum + m.totalCount, 0);
+  const rangeSubtitle =
+    monthlyTrends.length > 0
+      ? `${monthlyTrends[0].label} – ${monthlyTrends[monthlyTrends.length - 1].label} · ${chartCountTotal} of ${metrics.totalInvoices} invoices`
+      : 'No valid invoice dates available';
 
   const handleExportCsv = () => {
     exportInvoicesToCsv(invoices, settings.workspaceName);
@@ -108,82 +117,139 @@ export function ReportsPage() {
         <Card className="lg:col-span-7">
           <CardHeader
             title="Monthly Invoice Volume Trend"
-            subtitle="Jun–Sep 2026 baseline + Oct–Nov 2026 live sample data"
+            subtitle={rangeSubtitle}
+            action={
+              <div
+                role="group"
+                aria-label="Reporting window"
+                className="flex items-center gap-1 rounded-lg bg-slate-100 p-1"
+              >
+                {(
+                  [
+                    { label: '6M', value: 6 },
+                    { label: '12M', value: 12 },
+                    { label: 'All', value: 'all' },
+                  ] as const
+                ).map((option) => (
+                  <button
+                    key={option.label}
+                    type="button"
+                    onClick={() => setTrendWindow(option.value)}
+                    className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
+                      trendWindow === option.value
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            }
           />
           <div className="p-5">
-            <div className="flex h-60 items-end justify-between gap-3 border-b border-slate-200 pb-3 pt-4">
-              {monthlyTrends.map((month) => {
-                const verifiedH = Math.round(
-                  (month.verifiedCount / maxMonthlyCount) * 180
-                );
-                const pendingH = Math.round(
-                  (month.pendingCount / maxMonthlyCount) * 180
-                );
-                const flaggedH = Math.round(
-                  (month.flaggedCount / maxMonthlyCount) * 180
-                );
+            {monthlyTrends.length === 0 ? (
+              <div className="flex h-60 flex-col items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50/70 px-4 text-center">
+                <BarChart3 className="h-6 w-6 text-slate-400" />
+                <p className="mt-2 text-xs font-semibold text-slate-800">
+                  No dated invoices to chart
+                </p>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Invoices with valid YYYY-MM-DD dates appear automatically in this
+                  chronological chart.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="overflow-x-auto">
+                  <div className="min-w-[360px]">
+                    <div className="flex h-60 items-end justify-between gap-2 border-b border-slate-200 pb-3 pt-4 sm:gap-3">
+                      {monthlyTrends.map((month) => {
+                        const verifiedH = Math.round(
+                          (month.verifiedCount / maxMonthlyCount) * 180
+                        );
+                        const pendingH = Math.round(
+                          (month.pendingCount / maxMonthlyCount) * 180
+                        );
+                        const flaggedH = Math.round(
+                          (month.flaggedCount / maxMonthlyCount) * 180
+                        );
 
-                return (
-                  <div
-                    key={month.monthKey}
-                    className="flex flex-1 flex-col items-center gap-2"
-                  >
-                    <span className="font-mono text-[11px] font-semibold text-slate-700 tabular-nums">
-                      {month.totalCount}
-                    </span>
-                    <div className="flex w-full max-w-[42px] flex-col-reverse overflow-hidden rounded-t-md bg-slate-100">
-                      {verifiedH > 0 && (
-                        <div
-                          style={{ height: `${verifiedH}px` }}
-                          className="w-full bg-emerald-500"
-                          title={`Verified: ${month.verifiedCount}`}
-                        />
-                      )}
-                      {pendingH > 0 && (
-                        <div
-                          style={{ height: `${pendingH}px` }}
-                          className="w-full bg-amber-400"
-                          title={`Pending: ${month.pendingCount}`}
-                        />
-                      )}
-                      {flaggedH > 0 && (
-                        <div
-                          style={{ height: `${flaggedH}px` }}
-                          className="w-full bg-rose-500"
-                          title={`Flagged: ${month.flaggedCount}`}
-                        />
-                      )}
+                        return (
+                          <div
+                            key={month.monthKey}
+                            className="flex flex-1 flex-col items-center gap-2"
+                          >
+                            <span className="font-mono text-[11px] font-semibold text-slate-700 tabular-nums">
+                              {month.totalCount}
+                            </span>
+                            <div className="flex w-full max-w-[42px] flex-col-reverse overflow-hidden rounded-t-md bg-slate-100">
+                              {verifiedH > 0 && (
+                                <div
+                                  style={{ height: `${verifiedH}px` }}
+                                  className="w-full bg-emerald-500"
+                                  title={`Verified: ${month.verifiedCount}`}
+                                />
+                              )}
+                              {pendingH > 0 && (
+                                <div
+                                  style={{ height: `${pendingH}px` }}
+                                  className="w-full bg-amber-400"
+                                  title={`Pending: ${month.pendingCount}`}
+                                />
+                              )}
+                              {flaggedH > 0 && (
+                                <div
+                                  style={{ height: `${flaggedH}px` }}
+                                  className="w-full bg-rose-500"
+                                  title={`Flagged: ${month.flaggedCount}`}
+                                />
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="mt-2 flex justify-between gap-2 text-center sm:gap-3">
+                      {monthlyTrends.map((month) => (
+                        <div key={month.monthKey} className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-medium text-slate-700">
+                            {month.label}
+                          </p>
+                          <p className="truncate font-mono text-[10px] text-slate-400 tabular-nums">
+                            {formatINRCompact(month.totalValue)}
+                          </p>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                );
-              })}
-            </div>
-
-            <div className="mt-2 flex justify-between gap-3 text-center">
-              {monthlyTrends.map((month) => (
-                <div key={month.monthKey} className="flex-1">
-                  <p className="text-xs font-medium text-slate-700">{month.label}</p>
-                  <p className="font-mono text-[10px] text-slate-400 tabular-nums">
-                    {formatINRCompact(month.totalValue)}
-                  </p>
                 </div>
-              ))}
-            </div>
 
-            <div className="mt-4 flex flex-wrap items-center gap-4 text-xs text-slate-600">
-              <span className="inline-flex items-center gap-1.5">
-                <span className="h-2.5 w-2.5 rounded-xs bg-emerald-500" />
-                Verified
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="h-2.5 w-2.5 rounded-xs bg-amber-400" />
-                Pending Review
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span className="h-2.5 w-2.5 rounded-xs bg-rose-500" />
-                Flagged
-              </span>
-            </div>
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+                  <div className="flex flex-wrap items-center gap-4">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-xs bg-emerald-500" />
+                      Verified
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-xs bg-amber-400" />
+                      Pending Review
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-xs bg-rose-500" />
+                      Flagged
+                    </span>
+                  </div>
+                  {chartCountTotal !== metrics.totalInvoices && (
+                    <span className="text-[11px] text-amber-700">
+                      {metrics.totalInvoices - chartCountTotal} invoice(s) outside window
+                      or undated
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         </Card>
 

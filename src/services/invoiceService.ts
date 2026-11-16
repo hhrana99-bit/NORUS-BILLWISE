@@ -6,7 +6,7 @@ import type {
   Supplier,
   SupplierSummary,
 } from '../types/domain';
-import { getTotalTax } from './formatters';
+import { formatINR, getTotalTax } from './formatters';
 
 export type InvoiceSortField =
   | 'invoiceNumber'
@@ -24,6 +24,11 @@ export interface InvoiceFilterCriteria {
   status: 'All' | InvoiceStatus;
   taxType: 'All' | 'Intra-State (CGST+SGST)' | 'Inter-State (IGST)';
   supplierId?: string;
+  supplierName?: string;
+}
+
+export function normalizeSupplierName(name: string): string {
+  return name.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
 export function computeArithmeticCheck(invoice: {
@@ -46,6 +51,44 @@ export function computeArithmeticCheck(invoice: {
   };
 }
 
+export function detectDuplicateWarning(
+  candidate: Pick<
+    Invoice,
+    'id' | 'invoiceNumber' | 'supplierName' | 'totalAmount' | 'duplicateWarning'
+  >,
+  allInvoices: Invoice[]
+): string | undefined {
+  if (candidate.duplicateWarning) {
+    return candidate.duplicateWarning;
+  }
+
+  const normalizedNumber = candidate.invoiceNumber.trim().toLowerCase();
+  const normalizedSupplier = normalizeSupplierName(candidate.supplierName);
+
+  for (const other of allInvoices) {
+    if (other.id === candidate.id) continue;
+    const sameSupplier =
+      normalizeSupplierName(other.supplierName) === normalizedSupplier;
+    if (!sameSupplier) continue;
+
+    if (
+      normalizedNumber &&
+      other.invoiceNumber.trim().toLowerCase() === normalizedNumber
+    ) {
+      return `Potential duplicate invoice number: ${candidate.invoiceNumber} already exists for ${candidate.supplierName}.`;
+    }
+
+    if (
+      candidate.totalAmount > 0 &&
+      Math.abs(other.totalAmount - candidate.totalAmount) < 0.01
+    ) {
+      return `Similar total (${formatINR(candidate.totalAmount)}) recorded on ${other.invoiceNumber}. Confirm this is not a duplicate.`;
+    }
+  }
+
+  return undefined;
+}
+
 export function filterAndSortInvoices(
   invoices: Invoice[],
   criteria: InvoiceFilterCriteria,
@@ -53,14 +96,25 @@ export function filterAndSortInvoices(
   sortDirection: SortDirection
 ): Invoice[] {
   const query = criteria.search.trim().toLowerCase();
+  const targetNormalizedSupplier = criteria.supplierName
+    ? normalizeSupplierName(criteria.supplierName)
+    : undefined;
 
   const filtered = invoices.filter((inv) => {
     if (criteria.status !== 'All' && inv.status !== criteria.status) {
       return false;
     }
 
-    if (criteria.supplierId && inv.supplierId !== criteria.supplierId) {
-      return false;
+    if (criteria.supplierId || targetNormalizedSupplier) {
+      const matchesId = criteria.supplierId
+        ? inv.supplierId === criteria.supplierId
+        : false;
+      const matchesName = targetNormalizedSupplier
+        ? normalizeSupplierName(inv.supplierName) === targetNormalizedSupplier
+        : false;
+      if (!matchesId && !matchesName) {
+        return false;
+      }
     }
 
     if (criteria.taxType === 'Intra-State (CGST+SGST)' && inv.cgst + inv.sgst === 0) {
@@ -109,10 +163,11 @@ export function buildSupplierSummaries(
   invoices: Invoice[]
 ): SupplierSummary[] {
   return suppliers.map((sup) => {
+    const normalizedSupName = normalizeSupplierName(sup.name);
     const supInvoices = invoices.filter(
       (inv) =>
         inv.supplierId === sup.id ||
-        inv.supplierName.toLowerCase() === sup.name.toLowerCase()
+        normalizeSupplierName(inv.supplierName) === normalizedSupName
     );
     const totalValue = supInvoices.reduce((sum, inv) => sum + inv.totalAmount, 0);
     const sortedDates = supInvoices
@@ -133,6 +188,7 @@ export function createDemoUploadedInvoice(params: {
   previewUrl: string;
   supplierName: string;
   invoiceNumber: string;
+  suppliers?: Supplier[];
 }): Invoice {
   const today = new Date().toISOString().slice(0, 10);
   const id = `inv-local-${Date.now()}`;
@@ -140,6 +196,10 @@ export function createDemoUploadedInvoice(params: {
     params.invoiceNumber.trim() || `DEMO-${String(Date.now()).slice(-4)}`;
   const cleanSupplier =
     params.supplierName.trim() || 'Unassigned Supplier (Manual Entry Required)';
+
+  const matchedSupplier = params.suppliers?.find(
+    (sup) => normalizeSupplierName(sup.name) === normalizeSupplierName(cleanSupplier)
+  );
 
   const fieldKeys: InvoiceFieldKey[] = [
     'supplierName',
@@ -165,9 +225,9 @@ export function createDemoUploadedInvoice(params: {
   return {
     id,
     invoiceNumber: cleanNumber,
-    supplierId: 'sup-local',
-    supplierName: cleanSupplier,
-    supplierGstin: 'PENDING-ENTRY',
+    supplierId: matchedSupplier?.id ?? 'sup-local',
+    supplierName: matchedSupplier?.name ?? cleanSupplier,
+    supplierGstin: matchedSupplier?.gstin ?? 'PENDING-ENTRY',
     invoiceDate: today,
     uploadDate: today,
     taxableAmount: 0,
@@ -187,3 +247,117 @@ export function createDemoUploadedInvoice(params: {
     fieldMeta,
   };
 }
+
+export const PREDEFINED_FLAG_REASONS = [
+  'Tax / total arithmetic mismatch',
+  'Duplicate invoice suspicion',
+  'Supplier GSTIN invalid or pending verification',
+  'HSN / SAC code or GST rate mismatch',
+  'Missing supporting PO / GRN reference',
+] as const;
+
+export const CUSTOM_FLAG_OPTION = '__CUSTOM__';
+
+export function resolveFlagReason(params: {
+  selectedReason: string;
+  customReason: string;
+}): { ok: true; reason: string } | { ok: false; error: string } {
+  const trimmedCustom = params.customReason.trim();
+  const isCustomMode = params.selectedReason === CUSTOM_FLAG_OPTION;
+
+  if (isCustomMode) {
+    if (!trimmedCustom) {
+      return {
+        ok: false,
+        error: 'Enter a custom flag reason (cannot be empty or whitespace only).',
+      };
+    }
+    return { ok: true, reason: trimmedCustom };
+  }
+
+  if (params.customReason.length > 0 && !trimmedCustom) {
+    return {
+      ok: false,
+      error: 'Additional custom note cannot contain only whitespace.',
+    };
+  }
+
+  const baseReason = params.selectedReason.trim();
+  if (!baseReason) {
+    return {
+      ok: false,
+      error: 'Select a flag reason or enter a custom reason.',
+    };
+  }
+
+  if (trimmedCustom) {
+    return { ok: true, reason: `${baseReason} — ${trimmedCustom}` };
+  }
+
+  return { ok: true, reason: baseReason };
+}
+
+const EDITABLE_FIELD_KEYS: InvoiceFieldKey[] = [
+  'supplierName',
+  'supplierGstin',
+  'invoiceNumber',
+  'invoiceDate',
+  'taxableAmount',
+  'cgst',
+  'sgst',
+  'igst',
+  'totalAmount',
+];
+
+export function hasUnsavedInvoiceChanges(
+  original: Invoice | undefined,
+  draft: Invoice | undefined
+): boolean {
+  if (!original || !draft) return false;
+  if (original.id !== draft.id) return false;
+
+  if (
+    original.supplierName !== draft.supplierName ||
+    original.supplierGstin !== draft.supplierGstin ||
+    original.invoiceNumber !== draft.invoiceNumber ||
+    original.invoiceDate !== draft.invoiceDate ||
+    original.taxableAmount !== draft.taxableAmount ||
+    original.cgst !== draft.cgst ||
+    original.sgst !== draft.sgst ||
+    original.igst !== draft.igst ||
+    original.totalAmount !== draft.totalAmount ||
+    original.reviewerNote !== draft.reviewerNote ||
+    (original.flagReason ?? '') !== (draft.flagReason ?? '')
+  ) {
+    return true;
+  }
+
+  for (const key of EDITABLE_FIELD_KEYS) {
+    const origMeta = original.fieldMeta[key];
+    const draftMeta = draft.fieldMeta[key];
+    if (
+      origMeta.status !== draftMeta.status ||
+      origMeta.evidenceNote !== draftMeta.evidenceNote
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function removeLocalStagedInvoice(
+  invoices: Invoice[],
+  invoiceId: string
+): { updated: Invoice[]; removed: Invoice | null } {
+  const target = invoices.find((inv) => inv.id === invoiceId);
+  if (!target || !target.isLocalUpload) {
+    return { updated: invoices, removed: null };
+  }
+
+  return {
+    updated: invoices.filter((inv) => inv.id !== invoiceId),
+    removed: target,
+  };
+}
+

@@ -8,6 +8,7 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react';
+import { useEffect } from 'react';
 import { useWorkspace } from '../../state/WorkspaceContext';
 import type { AppRoute } from '../../types/domain';
 import { Logo } from '../common/Logo';
@@ -35,6 +36,18 @@ export function Sidebar({
   onCloseMobile: () => void;
 }) {
   const { activeRoute, navigate, invoices } = useWorkspace();
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onCloseMobile();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [mobileOpen, onCloseMobile]);
 
   const pendingOrFlaggedCount = invoices.filter(
     (inv) => inv.status === 'Pending Review' || inv.status === 'Flagged'
