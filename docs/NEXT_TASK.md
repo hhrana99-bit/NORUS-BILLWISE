@@ -1,35 +1,40 @@
 # NEXT_TASK — Exact Next Recommended Development Task
 
-## Immediate Repository Hygiene Note
+## Immediate Verification Prerequisite (Run Outside Container Runtime)
 
-- Ensure Task 001.3 + Task 002.1/002.1A documentation changes (`docs/BACKEND_ARCHITECTURE.md`, `docs/DATABASE_SCHEMA.md`, `docs/API_CONTRACT.md`, `.github/workflows/ci.yml`) are synced to GitHub branch `task-001-2-remediation` (confirming `bun.lock` remains ignored/uncommitted) and verify **Frontend CI** passes.
+Before starting Task 002.3 feature endpoints, verify the Task 002.2 backend foundation in a standard **Python 3.12+ + PostgreSQL 16+** environment (and sync the repository to GitHub branch `task-001-2-remediation`):
+
+1. Install backend dependencies (`pip install -r backend/requirements.txt`).
+2. Run unit & API tests (`cd backend && pytest`).
+3. Boot PostgreSQL 16+, set `DATABASE_URL` / `TEST_DATABASE_URL`, run `alembic upgrade head`, run `alembic downgrade base`, run `alembic upgrade head`, and execute `pytest -v` including `test_migrations.py`.
+4. Start `uvicorn app.main:app --port 8000` and verify `GET /api/v1/health` (`200`) and `GET /api/v1/ready` (`200`).
 
 ---
 
-## Next Development Milestone: NORUS BILLWISE TASK 002.2 — Backend Service Skeleton, Database Engine & Migrations
+## Next Development Milestone: NORUS BILLWISE TASK 002.3 — Cookie Authentication, Organizations, Workspaces & RBAC Membership Guards
 
 ### Objective
-Bootstrap the portable `/backend` Python FastAPI + PostgreSQL + SQLAlchemy 2.0 + Alembic foundation matching the finalized Task 002.1A design in `docs/BACKEND_ARCHITECTURE.md`, `docs/DATABASE_SCHEMA.md`, and `docs/API_CONTRACT.md`, without altering the existing frontend or enabling autonomous invoice approval.
+Implement secure browser cookie authentication, session rotation/revocation, CSRF protection, organization/workspace provisioning, and workspace-scoped RBAC dependencies on top of the Task 002.2 `/backend` foundation.
 
 ### Deliverables
 
-1. **FastAPI Application Structure (`/backend`)**
-   - Create modular package layout: `app/core/config.py` (`pydantic-settings`), `app/core/logging.py`, `app/schemas/base.py` (shared `ApiModel` with `camelCase` alias generation and `snake_case` Python attributes), `app/db/session.py`, `app/db/base.py`, `app/main.py`, `tests/`.
-   - Add backend `.env.example` (`DATABASE_URL`, `JWT_SECRET_KEY`, `DOCUMENT_STORAGE_ROOT`, `CORS_ORIGINS`, `COOKIE_SECURE`) with zero hardcoded secrets.
-   - Add `pyproject.toml` / `requirements.txt` pinned cleanly for reproducible installs (`fastapi`, `uvicorn`, `sqlalchemy`, `psycopg[binary]`, `alembic`, `pydantic-settings`, `pytest`, `httpx`).
-2. **PostgreSQL & Alembic Migrations**
-   - Configure Alembic (`alembic.ini`, `alembic/env.py`) against `snake_case` SQLAlchemy 2.0 declarative metadata.
-   - Author initial migration (`0001_initial_foundation`) creating core tenancy & identity tables (`organizations`, `users`, `user_sessions` with rotation/revocation columns, `workspaces`, `workspace_settings`, `organization_memberships`, `workspace_memberships`), `suppliers`, `documents`, `invoices` (including flexible Indian GST, advisory line-item reconciliation, and audit-safe soft-delete columns/constraints), `invoice_line_items`, `invoice_field_verifications`, `invoice_review_flags`, `review_actions`, and `audit_events`.
-3. **Health Endpoints, CI & Tests**
-   - Implement `GET /api/v1/health` (liveness) and `GET /api/v1/ready` (database connectivity check).
-   - Add automated `pytest` tests verifying configuration validation, `ApiModel` `camelCase` serialization, health/readiness probes, and clean migration upgrade/downgrade against PostgreSQL.
-   - Extend GitHub Actions CI with a backend verification job (`ruff` / `mypy` / `pytest`) alongside existing Frontend CI.
+1. **Password Hashing & Token Security (`app/core/security.py`)**
+   - Argon2id password hashing and verification.
+   - Short-lived signed `norus_access_token` JWT creation/verification carrying `sub`, `sid`, `org_id`, and token claims.
+   - Cryptographically random `norus_refresh_token` generation + SHA-256 hashing (`user_sessions.refresh_token_hash`), token-family rotation (`replaced_by_session_id`), and reuse detection revoking the entire `token_family_id`.
+2. **Authentication, Session & CSRF Dependencies (`app/api/v1/auth.py`, `app/core/deps.py`)**
+   - Implement `POST /api/v1/auth/register`, `POST /api/v1/auth/login`, `POST /api/v1/auth/refresh`, `POST /api/v1/auth/logout`, `POST /api/v1/auth/logout-all`, and `GET /api/v1/auth/me`.
+   - Enforce `HttpOnly`, `Secure` (per config), `SameSite=Lax` auth cookies plus double-submit CSRF cookie (`norus_csrf_token`) & `X-CSRF-Token` validation on unsafe HTTP methods (`POST`, `PUT`, `PATCH`, `DELETE`).
+   - Never issue bearer tokens for `localStorage`.
+3. **Organizations, Workspaces & RBAC Guards (`app/api/v1/workspaces.py`, `app/core/rbac.py`)**
+   - Implement `GET /api/v1/workspaces`, `POST /api/v1/workspaces`, `GET /api/v1/workspaces/{workspaceId}/settings`, `PATCH /api/v1/workspaces/{workspaceId}/settings` (`WORKSPACE_ADMIN` only; preserving `require_human_review = true`), and membership management routes.
+   - Enforce `WorkspaceContext` authorization (`WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`) across all tenant-scoped routes and record `audit_events` for login/logout/settings/membership mutations.
+4. **Tests & CI**
+   - Add `pytest` integration tests covering login, CSRF enforcement, refresh rotation, reuse detection, logout/logout-all revocation, cross-workspace isolation, and role enforcement.
+   - Extend `.github/workflows/ci.yml` with a dedicated `backend-ci` job (`PostgreSQL 16` service container, Alembic migration check, and `pytest`).
 
-### Subsequent Tasks (Following Task 002.2)
-- **Task 002.3:** Cookie Authentication (`HttpOnly`/`Secure`/`SameSite`, CSRF guard, refresh rotation, logout/logout-all, Argon2id), Organizations, Workspaces & RBAC Membership guards.
-- **Task 002.4:** Suppliers Master & Secure Document Upload/Storage Service.
+### Subsequent Tasks (Following Task 002.3)
+- **Task 002.4:** Suppliers Master & Secure Document Upload/Storage Service (`DocumentStorage`).
 - **Task 002.5:** Invoices CRUD, Flexible Indian GST & Advisory Line-Item Reconciliation Engine, and Advisory Duplicate Detection.
 - **Task 002.6:** Human Review Workflow (`/verify`, `/flag`, `/flags/{flagId}/resolve`, `/reopen`, `WORKSPACE_ADMIN` draft soft-delete, immutable `review_actions` & `audit_events`).
-- **Task 002.7:** Reporting Aggregations, Formula-Safe CSV Export & Frontend `WorkspaceContext` API Integration (`credentials: 'include'` + `X-CSRF-Token`, zero tokens in `localStorage`).
-
-
+- **Task 002.7:** Reporting Aggregations, Formula-Safe CSV Export & Frontend `WorkspaceContext` API Integration (`credentials: 'include'` + `X-CSRF-Token`).
