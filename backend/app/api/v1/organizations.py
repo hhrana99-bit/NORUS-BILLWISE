@@ -24,6 +24,7 @@ from app.schemas.tenancy import (
     OrganizationInvitationAcceptRequest,
     OrganizationInvitationCreateRequest,
     OrganizationInvitationDto,
+    OrganizationInvitationListResponse,
     OrganizationListResponse,
     OrganizationMembershipDto,
     OrganizationMembershipListResponse,
@@ -129,7 +130,7 @@ def post_organization(
     response_model=OrganizationDto,
     response_model_by_alias=True,
     dependencies=[Depends(require_csrf)],
-    summary="Accept an organization invitation matching the caller's verified email",
+    summary="Accept an organization invitation matching the caller's account email",
 )
 def post_accept_organization_invitation(
     payload: OrganizationInvitationAcceptRequest,
@@ -251,7 +252,7 @@ def delete_organization_membership(
 
 @router.get(
     "/{organizationId}/invitations",
-    response_model=list[OrganizationInvitationDto],
+    response_model=OrganizationInvitationListResponse,
     response_model_by_alias=True,
     summary="List organization invitations (ORG_OWNER, ORG_ADMIN)",
 )
@@ -260,21 +261,23 @@ def get_organization_invitations(
         require_organization_role("ORG_OWNER", "ORG_ADMIN")
     ),
     db: Session = Depends(get_db),
-) -> list[OrganizationInvitationDto]:
+) -> OrganizationInvitationListResponse:
     rows = list_organization_invitations(db, organization_id=org_ctx.organization.id)
-    return [
-        OrganizationInvitationDto(
-            id=inv.id,
-            organization_id=inv.organization_id,
-            invited_email=inv.invited_email,
-            role=inv.role,  # type: ignore[arg-type]
-            status=_invitation_status(inv),  # type: ignore[arg-type]
-            expires_at=inv.expires_at,
-            created_at=inv.created_at,
-            invite_token=None,
-        )
-        for inv in rows
-    ]
+    return OrganizationInvitationListResponse(
+        items=[
+            OrganizationInvitationDto(
+                id=inv.id,
+                organization_id=inv.organization_id,
+                invited_email=inv.invited_email,
+                role=inv.role,  # type: ignore[arg-type]
+                status=_invitation_status(inv),  # type: ignore[arg-type]
+                expires_at=inv.expires_at,
+                created_at=inv.created_at,
+                invite_token=None,
+            )
+            for inv in rows
+        ]
+    )
 
 
 @router.post(

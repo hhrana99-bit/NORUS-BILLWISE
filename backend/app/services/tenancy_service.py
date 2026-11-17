@@ -190,6 +190,58 @@ def _assert_not_last_active_org_owner(
         )
 
 
+def _assert_org_member_not_sole_workspace_admin(
+    db: Session,
+    *,
+    organization_id: uuid.UUID,
+    target_user_id: uuid.UUID,
+) -> list[Workspace]:
+    """Lock org workspaces in deterministic order and block if user is sole active WORKSPACE_ADMIN."""
+    org_workspaces = list(
+        db.scalars(
+            select(Workspace)
+            .where(Workspace.organization_id == organization_id)
+            .order_by(Workspace.id.asc())
+            .with_for_update()
+        )
+    )
+    orphaned_workspaces: list[Workspace] = []
+    for ws in org_workspaces:
+        if not ws.is_active:
+            continue
+        active_admins = list(
+            db.scalars(
+                select(WorkspaceMembership)
+                .where(
+                    WorkspaceMembership.workspace_id == ws.id,
+                    WorkspaceMembership.role == "WORKSPACE_ADMIN",
+                    WorkspaceMembership.status == "ACTIVE",
+                )
+                .order_by(WorkspaceMembership.id.asc())
+                .with_for_update()
+            )
+        )
+        if len(active_admins) <= 1 and any(
+            admin.user_id == target_user_id for admin in active_admins
+        ):
+            orphaned_workspaces.append(ws)
+
+    if orphaned_workspaces:
+        raise AppError(
+            status_code=status.HTTP_409_CONFLICT,
+            code="CANNOT_ORPHAN_WORKSPACE_ADMIN",
+            message=(
+                "Cannot suspend or remove an organization member who is the sole active "
+                "workspace administrator; assign another workspace administrator first."
+            ),
+            details={
+                "workspaceIds": [str(ws.id) for ws in orphaned_workspaces],
+                "workspaceCodes": [ws.workspace_code for ws in orphaned_workspaces],
+            },
+        )
+    return org_workspaces
+
+
 def update_organization_membership(
     db: Session,
     *,
@@ -247,6 +299,16 @@ def update_organization_membership(
             db,
             organization_id=organization.id,
             target_membership=membership,
+        )
+
+    suspending_member = (
+        membership.status == "ACTIVE" and new_status == "SUSPENDED"
+    )
+    if suspending_member:
+        _assert_org_member_not_sole_workspace_admin(
+            db,
+            organization_id=organization.id,
+            target_user_id=membership.user_id,
         )
 
     previous_role = membership.role
@@ -339,17 +401,24 @@ def remove_organization_membership(
         target_membership=membership,
     )
 
-    # Also remove workspace memberships held by this user inside the organization
-    org_workspace_ids = list(
-        db.scalars(select(Workspace.id).where(Workspace.organization_id == organization.id))
+    org_workspaces = _assert_org_member_not_sole_workspace_admin(
+        db,
+        organization_id=organization.id,
+        target_user_id=membership.user_id,
     )
+
+    # Also remove workspace memberships held by this user inside the organization
+    org_workspace_ids = [ws.id for ws in org_workspaces]
     if org_workspace_ids:
         ws_memberships = list(
             db.scalars(
-                select(WorkspaceMembership).where(
+                select(WorkspaceMembership)
+                .where(
                     WorkspaceMembership.workspace_id.in_(org_workspace_ids),
                     WorkspaceMembership.user_id == membership.user_id,
                 )
+                .order_by(WorkspaceMembership.id.asc())
+                .with_for_update()
             )
         )
         for ws_mem in ws_memberships:
@@ -462,6 +531,7 @@ def revoke_organization_invitation(
     actor: User,
     ip_address: str | None,
 ) -> None:
+    _lock_organization_for_mutation(db, organization.id)
     invitation = db.scalar(
         select(OrganizationInvitation)
         .where(
@@ -509,9 +579,29 @@ def accept_organization_invitation(
     ip_address: str | None,
 ) -> tuple[Organization, OrganizationMembership]:
     token_hash = hash_refresh_token(raw_token)
+
+    # Resolve parent organization_id before locking so acceptance always obeys
+    # the exact same lock order as invitation creation: Organization -> OrganizationInvitation.
+    inv_org_id = db.scalar(
+        select(OrganizationInvitation.organization_id).where(
+            OrganizationInvitation.token_hash == token_hash
+        )
+    )
+    if inv_org_id is None:
+        raise AppError(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="INVITATION_NOT_FOUND",
+            message="Organization invitation is invalid.",
+        )
+
+    _lock_organization_for_mutation(db, inv_org_id)
+
     invitation = db.scalar(
         select(OrganizationInvitation)
-        .where(OrganizationInvitation.token_hash == token_hash)
+        .where(
+            OrganizationInvitation.token_hash == token_hash,
+            OrganizationInvitation.organization_id == inv_org_id,
+        )
         .with_for_update()
     )
     if invitation is None:
@@ -540,7 +630,6 @@ def accept_organization_invitation(
             message="Authenticated user email does not match the invitation email.",
         )
 
-    _lock_organization_for_mutation(db, invitation.organization_id)
     organization = db.get(Organization, invitation.organization_id)
     if organization is None or not organization.is_active:
         raise AppError(

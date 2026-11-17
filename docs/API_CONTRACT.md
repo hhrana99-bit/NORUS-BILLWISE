@@ -41,7 +41,7 @@
 
 ### `POST /api/v1/auth/register`
 - **Purpose:** Register a new user account and optionally bootstrap an initial Organization + Workspace, setting authentication and CSRF cookies. Password must contain at least 12 non-whitespace characters.
-- **Auth:** Public (`Origin`/`Referer`-validated, PostgreSQL multi-worker rate-limited).
+- **Auth:** Public (`Origin`/`Referer`-validated, PostgreSQL multi-worker rate-limited by client IP).
 - **Request Body:**
   ```json
   {
@@ -52,19 +52,28 @@
     "firmType": "Chartered Accountancy Practice"
   }
   ```
-- **Response (`201 Created`):** User profile and initial organization/workspace summary (no tokens in body); sets `Set-Cookie` for `norus_access_token`, `norus_refresh_token`, and `norus_csrf_token`.
+- **Response (`201 Created`):**
+  ```json
+  {
+    "user": { "id": "uuid", "email": "ananya@deshmukhca.example", "fullName": "CA Ananya Deshmukh", "isActive": true },
+    "organization": { "id": "uuid", "name": "Deshmukh & Associates CA", "slug": "deshmukh-associates-ca", "firmType": "Chartered Accountancy Practice", "role": "ORG_OWNER" },
+    "workspace": { "workspaceId": "uuid", "organizationId": "uuid", "name": "Deshmukh & Associates CA", "workspaceCode": "WS-DEFAULT-001", "role": "WORKSPACE_ADMIN" },
+    "sessionExpiresAt": "2026-11-30T10:30:00Z"
+  }
+  ```
+  *(Note: `organization` and `workspace` are `null` when `organizationName` is omitted; tokens are set strictly via `HttpOnly` cookies and omitted from the body.)*
 - **Errors:** `403 CSRF_TOKEN_INVALID`, `409 EMAIL_ALREADY_EXISTS`, `409 ORGANIZATION_SLUG_CONFLICT`, `422 VALIDATION_ERROR`, `429 RATE_LIMITED` (`Retry-After` header).
 
 ### `POST /api/v1/auth/login`
 - **Purpose:** Authenticate user via Argon2id password check, create a `user_sessions` record, emit organization-scoped `auth.login` audit event (`workspace_id = null`), and issue `HttpOnly` access/refresh cookies plus `norus_csrf_token`.
-- **Auth:** Public (`Origin`/`Referer`-validated, PostgreSQL multi-worker rate-limited by IP and normalized account).
+- **Auth:** Public (`Origin`/`Referer`-validated, PostgreSQL multi-worker rate-limited by client IP and `(client_ip, normalized_account)` bucket to avoid cross-IP account lockout DoS).
 - **Request Body:** `{ "email": "...", "password": "..." }`
 - **Response (`200 OK`):**
   ```json
   {
-    "user": { "id": "uuid", "email": "...", "fullName": "CA Ananya Deshmukh" },
+    "user": { "id": "uuid", "email": "ananya@deshmukhca.example", "fullName": "CA Ananya Deshmukh", "isActive": true },
     "workspaces": [
-      { "workspaceId": "uuid", "name": "Deshmukh & Associates CA", "workspaceCode": "WS-IN-MUM-001", "role": "WORKSPACE_ADMIN" }
+      { "workspaceId": "uuid", "organizationId": "uuid", "name": "Deshmukh & Associates CA", "workspaceCode": "WS-DEFAULT-001", "role": "WORKSPACE_ADMIN" }
     ],
     "sessionExpiresAt": "2026-11-30T10:30:00Z"
   }
@@ -91,7 +100,18 @@
 ### `GET /api/v1/auth/me`
 - **Purpose:** Return authenticated user profile and active organization/workspace memberships so the SPA can hydrate session state without reading cookies or `localStorage`.
 - **Auth:** Valid access cookie (`norus_access_token` with non-revoked `sid`).
-- **Response (`200 OK`):** User summary + `organizations[]` + `workspaces[]` with roles.
+- **Response (`200 OK`):**
+  ```json
+  {
+    "user": { "id": "uuid", "email": "ananya@deshmukhca.example", "fullName": "CA Ananya Deshmukh", "isActive": true },
+    "organizations": [
+      { "id": "uuid", "name": "Deshmukh & Associates CA", "slug": "deshmukh-associates-ca", "firmType": "Chartered Accountancy Practice", "role": "ORG_OWNER" }
+    ],
+    "workspaces": [
+      { "workspaceId": "uuid", "organizationId": "uuid", "name": "Deshmukh & Associates CA", "workspaceCode": "WS-DEFAULT-001", "role": "WORKSPACE_ADMIN" }
+    ]
+  }
+  ```
 
 ---
 
@@ -100,26 +120,26 @@
 ### `GET /api/v1/organizations`
 - **Purpose:** List organizations where the current user holds an active membership.
 - **Auth:** Authenticated user.
-- **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "name": "...", "slug": "...", "firmType": "...", "role": "ORG_OWNER" }] }`.
+- **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "name": "...", "slug": "...", "firmType": "...", "primaryContactEmail": "...", "role": "ORG_OWNER", "isActive": true, "createdAt": "2026-11-17T10:30:00Z" }] }`.
 
 ### `POST /api/v1/organizations`
 - **Purpose:** Create a new accounting firm or enterprise organization and assign creator as `ORG_OWNER`.
 - **Auth:** Authenticated user + CSRF.
 - **Request Body:** `{ "name": "...", "firmType": "...", "primaryContactEmail": "..." }`
-- **Response (`201 Created`):** Created organization DTO.
+- **Response (`201 Created`):** `OrganizationDto` (`id`, `name`, `slug`, `firmType`, `primaryContactEmail`, `role`, `isActive`, `createdAt`).
 
 ### `GET /api/v1/organizations/{organizationId}/memberships`
 - **Purpose:** List organization members and roles.
 - **Auth:** `ORG_OWNER` or `ORG_ADMIN` of `{organizationId}`.
-- **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "organizationId": "uuid", "userId": "uuid", "email": "...", "fullName": "...", "role": "ORG_MEMBER", "status": "ACTIVE" }] }`.
+- **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "organizationId": "uuid", "userId": "uuid", "email": "...", "fullName": "...", "role": "ORG_MEMBER", "status": "ACTIVE", "createdAt": "...", "updatedAt": "..." }] }`.
 
 ### `PATCH /api/v1/organizations/{organizationId}/memberships/{membershipId}`
-- **Purpose:** Update organization member role (`ORG_OWNER`/`ORG_ADMIN`/`ORG_MEMBER`) or status (`ACTIVE`/`SUSPENDED`). Suspensions/role changes immediately revoke target sessions; sole active `ORG_OWNER` cannot be downgraded or suspended (`409 CANNOT_DOWNGRADE_LAST_ORG_OWNER`).
+- **Purpose:** Update organization member role (`ORG_OWNER`/`ORG_ADMIN`/`ORG_MEMBER`) or status (`ACTIVE`/`SUSPENDED`). Suspensions/role changes immediately revoke target sessions; sole active `ORG_OWNER` cannot be downgraded or suspended (`409 CANNOT_DOWNGRADE_LAST_ORG_OWNER`). Suspending an organization member who is the sole active `WORKSPACE_ADMIN` of an active workspace is rejected (`409 CANNOT_ORPHAN_WORKSPACE_ADMIN`) until another workspace administrator is assigned.
 - **Auth:** `ORG_OWNER` or `ORG_ADMIN` (`ORG_OWNER` required to assign or alter `ORG_OWNER`) + CSRF.
-- **Response (`200 OK`):** Updated organization membership DTO.
+- **Response (`200 OK`):** Updated `OrganizationMembershipDto`.
 
 ### `DELETE /api/v1/organizations/{organizationId}/memberships/{membershipId}`
-- **Purpose:** Remove an organization member, cascade-remove their workspace memberships inside that organization, and revoke their sessions (protects sole active `ORG_OWNER`).
+- **Purpose:** Remove an organization member, cascade-remove their workspace memberships inside that organization, and revoke their sessions. Protects sole active `ORG_OWNER` (`409 CANNOT_DOWNGRADE_LAST_ORG_OWNER`) and rejects removal if the user is the sole active `WORKSPACE_ADMIN` of any active workspace (`409 CANNOT_ORPHAN_WORKSPACE_ADMIN`).
 - **Auth:** `ORG_OWNER` or `ORG_ADMIN` (`ORG_OWNER` required to remove `ORG_OWNER`) + CSRF.
 - **Response (`204 No Content`)**
 
@@ -127,11 +147,12 @@
 - **Purpose:** Issue an anti-enumeration invitation token (SHA-256 hashed at rest; raw `inviteToken` returned only once in the creation response). Does not disclose whether the invited email exists globally.
 - **Auth:** `ORG_OWNER` or `ORG_ADMIN` + CSRF.
 - **Request Body:** `{ "email": "staff@deshmukhca.example", "role": "ORG_MEMBER" }`
-- **Response (`201 Created`):** Invitation DTO including single-disclosure `inviteToken`.
+- **Response (`201 Created`):** `OrganizationInvitationDto` (`id`, `organizationId`, `invitedEmail`, `role`, `status`, `expiresAt`, `createdAt`, and single-disclosure `inviteToken`).
 
 ### `GET /api/v1/organizations/{organizationId}/invitations`
-- **Purpose:** List organization invitations (`inviteToken` is always omitted).
+- **Purpose:** List organization invitations (`inviteToken` is always `null`).
 - **Auth:** `ORG_OWNER` or `ORG_ADMIN`.
+- **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "organizationId": "uuid", "invitedEmail": "staff@deshmukhca.example", "role": "ORG_MEMBER", "status": "PENDING", "expiresAt": "...", "createdAt": "...", "inviteToken": null }] }`.
 
 ### `DELETE /api/v1/organizations/{organizationId}/invitations/{invitationId}`
 - **Purpose:** Revoke a pending invitation (`409 INVITATION_ALREADY_ACCEPTED` if already used).
@@ -139,28 +160,28 @@
 - **Response (`204 No Content`)**
 
 ### `POST /api/v1/organizations/invitations/accept`
-- **Purpose:** Accept an active, unexpired organization invitation where the authenticated caller's verified email matches `invitedEmail`.
+- **Purpose:** Accept an active, unexpired organization invitation where the authenticated caller's account `email` matches `invitedEmail` (case-insensitive) and the caller supplies the single-use `inviteToken`. **Implementation note:** `users.email_verified_at` / automated email verification delivery is not currently implemented in this milestone; acceptance enforces authenticated session email matching plus possession of the single-use invitation token.
 - **Auth:** Authenticated user + CSRF.
 - **Request Body:** `{ "token": "..." }`
-- **Response (`200 OK`):** Joined organization DTO.
+- **Response (`200 OK`):** Joined `OrganizationDto` (`id`, `name`, `slug`, `firmType`, `primaryContactEmail`, `role`, `isActive`, `createdAt`).
 - **Errors:** `403 INVITATION_EMAIL_MISMATCH`, `404 INVITATION_NOT_FOUND`, `409 INVITATION_EXPIRED_OR_USED`.
 
 ### `GET /api/v1/workspaces`
 - **Purpose:** List all active workspaces accessible to the authenticated user (requiring active `WorkspaceMembership`, `OrganizationMembership`, `Workspace`, and `Organization`; filterable by `organizationId`).
 - **Auth:** Authenticated user.
-- **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "organizationId": "uuid", "name": "...", "workspaceCode": "...", "role": "REVIEWER" }] }`.
+- **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "organizationId": "uuid", "name": "...", "workspaceCode": "...", "role": "REVIEWER", "isActive": true, "createdAt": "..." }] }`.
 
 ### `POST /api/v1/organizations/{organizationId}/workspaces`
 - **Purpose:** Create a new client workspace + default `workspace_settings` (`requireHumanReview = true`).
 - **Auth:** `ORG_OWNER` or `ORG_ADMIN` of `{organizationId}` + CSRF.
 - **Request Body:** `{ "name": "...", "workspaceCode": "...", "legalEntityName": "...", "companyGstin": "..." }`
-- **Response (`201 Created`):** Workspace + settings DTO.
+- **Response (`201 Created`):** `{ "workspace": { "id": "uuid", "organizationId": "uuid", "name": "...", "workspaceCode": "...", "isActive": true, "currentUserRole": "WORKSPACE_ADMIN", "createdAt": "..." }, "settings": { ... } }`.
 - **Errors:** `409 WORKSPACE_CODE_EXISTS`, `422 HUMAN_REVIEW_CANNOT_BE_DISABLED`.
 
 ### `GET /api/v1/workspaces/{workspaceId}`
 - **Purpose:** Fetch workspace metadata and caller's effective role.
 - **Auth:** Any active workspace member holding an active organization membership.
-- **Response (`200 OK`):** Workspace summary + `currentUserRole`.
+- **Response (`200 OK`):** `WorkspaceDetailDto` (`id`, `organizationId`, `name`, `workspaceCode`, `isActive`, `currentUserRole`, `createdAt`).
 
 ### `GET /api/v1/workspaces/{workspaceId}/settings`
 - **Purpose:** Retrieve `workspace_settings` (firm details, GST preferences, duplicate/mismatch toggles, rounding tolerance, notifications).
@@ -181,7 +202,7 @@
 ### `GET /api/v1/workspaces/{workspaceId}/memberships`
 - **Purpose:** List members and roles assigned to the workspace.
 - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `VIEWER`.
-- **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "userId": "uuid", "email": "...", "fullName": "...", "role": "REVIEWER", "status": "ACTIVE" }] }`.
+- **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "workspaceId": "uuid", "userId": "uuid", "email": "...", "fullName": "...", "role": "REVIEWER", "status": "ACTIVE", "createdAt": "...", "updatedAt": "..." }] }`.
 
 ### `POST /api/v1/workspaces/{workspaceId}/memberships`
 - **Purpose:** Grant an active member of the parent organization access to the workspace with an explicit role. Users must first be onboarded into the organization via `POST /organizations/{organizationId}/invitations` + `/invitations/accept`. Returns one uniform `404` response for unknown emails, non-members, and suspended organization members to prevent global email enumeration.
@@ -379,12 +400,16 @@
     "items": [
       {
         "id": "uuid",
+        "organizationId": "uuid",
+        "workspaceId": "uuid",
+        "actorUserId": "uuid",
+        "actorDisplayName": "CA Ananya Deshmukh",
         "eventType": "invoice.verified",
         "entityType": "invoice",
         "entityId": "uuid",
-        "actorDisplayName": "CA Ananya Deshmukh",
         "summary": "Marked invoice as Verified after human confirmation of 1,000.00 variance",
         "tone": "success",
+        "metadata": {},
         "createdAt": "2026-11-16T10:30:00Z"
       }
     ],

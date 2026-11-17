@@ -141,3 +141,26 @@ def test_settings_accepts_direct_python_list_cors_origins_and_nodecode_import() 
         "https://portal.norusbillwise.example",
     ]
 
+
+def test_settings_trusted_proxies_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg://postgres:realpass@localhost:5432/norus_billwise_test",
+    )
+    monkeypatch.setenv("JWT_SECRET_KEY", VALID_SECRET)
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("TRUSTED_PROXIES", "127.0.0.1, 10.0.0.0/8")
+
+    comma_settings = Settings(_env_file=None)
+    assert comma_settings.trusted_proxies == ["127.0.0.1/32", "10.0.0.0/8"]
+
+    monkeypatch.setenv("TRUSTED_PROXIES", '["192.168.10.5", "fd00::/8"]')
+    json_settings = Settings(_env_file=None)
+    assert json_settings.trusted_proxies == ["192.168.10.5/32", "fd00::/8"]
+
+    for bad_proxy in ("*", "0.0.0.0/0", "::/0", "not-an-ip-address"):
+        monkeypatch.setenv("TRUSTED_PROXIES", bad_proxy)
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -55,10 +56,80 @@ def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def get_client_ip(request: Request) -> str | None:
-    if request.client is None:
+def _parse_ip(raw_value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    cleaned = raw_value.strip()
+    if not cleaned:
         return None
-    return request.client.host
+    try:
+        return ipaddress.ip_address(cleaned)
+    except ValueError:
+        return None
+
+
+def _is_trusted_proxy_ip(
+    ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    trusted_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
+) -> bool:
+    return any(ip_obj in net for net in trusted_networks)
+
+
+def get_client_ip(request: Request, settings: Settings | None = None) -> str | None:
+    """Resolve client IP, trusting X-Forwarded-For ONLY when direct peer matches trusted_proxies."""
+    if request.client is None or not request.client.host:
+        return None
+
+    direct_host = request.client.host.strip()
+    if not direct_host:
+        return None
+
+    active_settings = settings
+    if active_settings is None:
+        app = request.scope.get("app")
+        if app is not None and hasattr(app, "state"):
+            active_settings = getattr(app.state, "settings", None)
+
+    trusted_entries = active_settings.trusted_proxies if active_settings is not None else []
+    if not trusted_entries:
+        return direct_host
+
+    direct_ip = _parse_ip(direct_host)
+    if direct_ip is None:
+        return direct_host
+
+    trusted_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for entry in trusted_entries:
+        try:
+            trusted_networks.append(ipaddress.ip_network(entry, strict=False))
+        except ValueError:
+            continue
+
+    if not trusted_networks or not _is_trusted_proxy_ip(direct_ip, trusted_networks):
+        return str(direct_ip)
+
+    xff_values = request.headers.getlist("x-forwarded-for")
+    if not xff_values:
+        return str(direct_ip)
+
+    raw_hops = [
+        hop.strip()
+        for header_val in xff_values
+        for hop in header_val.split(",")
+        if hop.strip()
+    ]
+    if not raw_hops:
+        return str(direct_ip)
+
+    last_trusted_valid_ip = str(direct_ip)
+    for raw_hop in reversed(raw_hops):
+        hop_ip = _parse_ip(raw_hop)
+        if hop_ip is None:
+            return last_trusted_valid_ip
+        if _is_trusted_proxy_ip(hop_ip, trusted_networks):
+            last_trusted_valid_ip = str(hop_ip)
+            continue
+        return str(hop_ip)
+
+    return last_trusted_valid_ip
 
 
 def require_allowed_origin(

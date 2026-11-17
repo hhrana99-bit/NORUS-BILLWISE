@@ -257,15 +257,31 @@ def register_user(
 
         if organization_name:
             clean_org_name = organization_name.strip()
-            org = Organization(
-                name=clean_org_name,
-                slug=generate_unique_org_slug(db, clean_org_name),
-                firm_type=firm_type.strip(),
-                primary_contact_email=normalized_email,
-                is_active=True,
-            )
-            db.add(org)
-            db.flush()
+            org: Organization | None = None
+            for attempt in range(4):
+                slug = (
+                    generate_unique_org_slug(db, clean_org_name)
+                    if attempt == 0
+                    else f"{generate_unique_org_slug(db, clean_org_name)[:70]}-{secrets.token_hex(4)}"
+                )
+                candidate = Organization(
+                    name=clean_org_name,
+                    slug=slug,
+                    firm_type=firm_type.strip(),
+                    primary_contact_email=normalized_email,
+                    is_active=True,
+                )
+                try:
+                    with db.begin_nested():
+                        db.add(candidate)
+                        db.flush()
+                    org = candidate
+                    break
+                except IntegrityError as exc:
+                    if _get_constraint_name(exc) == "uq_organizations_slug" and attempt < 3:
+                        continue
+                    raise
+            assert org is not None
 
             org_membership = OrganizationMembership(
                 organization_id=org.id,

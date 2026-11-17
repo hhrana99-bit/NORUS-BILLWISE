@@ -510,6 +510,56 @@ def test_migrations_use_op_f_for_check_constraints_matching_models() -> None:
     assert migration_checks == expected_model_checks
 
 
+def test_alembic_revision_ids_fit_alembic_version_and_linear_chain() -> None:
+    versions_dir = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+    migration_files = sorted(versions_dir.glob("*.py"))
+    assert len(migration_files) >= 2
+
+    revisions: dict[str, str | None] = {}
+    for migration_path in migration_files:
+        tree = ast.parse(migration_path.read_text(encoding="utf-8"))
+        rev: str | None = None
+        down_rev: str | None = None
+        saw_down_rev = False
+        for stmt in tree.body:
+            target_name: str | None = None
+            value_node: ast.AST | None = None
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                target_name = stmt.target.id
+                value_node = stmt.value
+            elif (
+                isinstance(stmt, ast.Assign)
+                and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+            ):
+                target_name = stmt.targets[0].id
+                value_node = stmt.value
+
+            if target_name == "revision" and value_node is not None:
+                rev = ast.literal_eval(value_node)
+            elif target_name == "down_revision" and value_node is not None:
+                down_rev = ast.literal_eval(value_node)
+                saw_down_rev = True
+
+        assert isinstance(rev, str) and rev
+        assert len(rev) <= 32, (
+            f"Alembic revision {rev!r} in {migration_path.name} exceeds VARCHAR(32) limit."
+        )
+        assert saw_down_rev
+        assert rev not in revisions, f"Duplicate Alembic revision {rev!r}"
+        revisions[rev] = down_rev
+
+    roots = [rev for rev, down_rev in revisions.items() if down_rev is None]
+    assert roots == ["0001_initial_foundation"]
+
+    referenced_parents = {
+        down_rev for down_rev in revisions.values() if down_rev is not None
+    }
+    assert referenced_parents.issubset(revisions.keys())
+    heads = [rev for rev in revisions if rev not in referenced_parents]
+    assert heads == ["0002_invites_and_rate_limits"]
+
+
 # ---------------------------------------------------------------------------
 # Pre-connection safety guard unit tests (must never connect or run Alembic)
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 """Add organization_invitations and auth_rate_limit_buckets tables.
 
-Revision ID: 0002_org_invitations_and_rate_limits
+Revision ID: 0002_invites_and_rate_limits
 Revises: 0001_initial_foundation
 Create Date: 2026-11-17 00:00:00+00:00
 
@@ -14,7 +14,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0002_org_invitations_and_rate_limits"
+revision: str = "0002_invites_and_rate_limits"
 down_revision: str | Sequence[str] | None = "0001_initial_foundation"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

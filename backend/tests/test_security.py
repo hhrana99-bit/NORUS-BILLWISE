@@ -355,3 +355,95 @@ def test_unhandled_exception_returns_sanitized_500_internal_error_envelope() -> 
     assert "sensitive internal db connection string secret" not in resp.text
 
 
+def test_get_client_ip_enforces_trusted_proxies_and_rejects_spoofing() -> None:
+    from starlette.requests import Request
+
+    from app.core.deps import get_client_ip
+
+    def _req(
+        client_host: str | None,
+        headers: list[tuple[bytes, bytes]] | None = None,
+    ) -> Request:
+        scope: dict[str, object] = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/login",
+            "headers": headers or [],
+        }
+        if client_host is not None:
+            scope["client"] = (client_host, 443)
+        return Request(scope)  # type: ignore[arg-type]
+
+    no_proxy_settings = _security_settings()
+    assert no_proxy_settings.trusted_proxies == []
+
+    # Without trusted proxies, X-Forwarded-For is always ignored
+    assert (
+        get_client_ip(
+            _req("198.51.100.10", [(b"x-forwarded-for", b"203.0.113.99")]),
+            no_proxy_settings,
+        )
+        == "198.51.100.10"
+    )
+
+    trusted_settings = Settings(
+        _env_file=None,
+        app_env="test",
+        database_url="postgresql+psycopg://postgres:test_only@localhost:5432/norus_billwise_test",
+        jwt_secret_key="unit-test-only-signing-secret-with-32-plus-chars",
+        cookie_secure=False,
+        cors_origins=["http://localhost:3000"],
+        trusted_proxies=["10.0.0.0/8", "fd00::/8"],
+    )
+
+    # Untrusted peer cannot spoof X-Forwarded-For
+    assert (
+        get_client_ip(
+            _req("198.51.100.10", [(b"x-forwarded-for", b"203.0.113.99")]),
+            trusted_settings,
+        )
+        == "198.51.100.10"
+    )
+
+    # Trusted proxy with spoofed leftmost IP + real appended client IP -> picks rightmost untrusted hop
+    assert (
+        get_client_ip(
+            _req("10.0.0.5", [(b"x-forwarded-for", b"1.2.3.4, 203.0.113.50")]),
+            trusted_settings,
+        )
+        == "203.0.113.50"
+    )
+
+    # Multi-hop trusted proxies -> walks past trusted proxy hops to real client
+    assert (
+        get_client_ip(
+            _req(
+                "10.0.0.5",
+                [(b"x-forwarded-for", b"1.2.3.4, 203.0.113.50, 10.0.0.2")],
+            ),
+            trusted_settings,
+        )
+        == "203.0.113.50"
+    )
+
+    # Malformed header from trusted proxy fails safe back to direct proxy IP
+    assert (
+        get_client_ip(
+            _req("10.0.0.5", [(b"x-forwarded-for", b"malformed-ip-header")]),
+            trusted_settings,
+        )
+        == "10.0.0.5"
+    )
+
+    # IPv6 trusted CIDR support
+    assert (
+        get_client_ip(
+            _req("fd00::12", [(b"x-forwarded-for", b"2001:db8::42")]),
+            trusted_settings,
+        )
+        == "2001:db8::42"
+    )
+
+    # Missing client returns None
+    assert get_client_ip(_req(None), trusted_settings) is None
+

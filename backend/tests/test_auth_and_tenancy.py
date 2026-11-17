@@ -1146,7 +1146,9 @@ def test_anti_enumeration_invitation_lifecycle_and_org_suspension(
     inv_token = inv_create.json()["inviteToken"]
     assert inv_token
 
-    listed_invs = owner_client.get(f"/api/v1/organizations/{org_id}/invitations").json()
+    listed_invs = owner_client.get(
+        f"/api/v1/organizations/{org_id}/invitations"
+    ).json()["items"]
     assert any(item["id"] == inv_id and item.get("inviteToken") is None for item in listed_invs)
 
     # Wrong user cannot accept another user's invitation token (403 INVITATION_EMAIL_MISMATCH)
@@ -1622,17 +1624,32 @@ def test_settings_null_rejection_duplicate_code_rollback_cookies_and_org_login_a
     assert login_events
     assert all(ev.workspace_id is None for ev in login_events)
 
-    # Verify refresh cookie Path=/api/v1/auth prevents transmission to workspace routes
-    @other_org_client.app.get("/api/v1/workspaces/_test_cookie_scope")
-    def _inspect_cookies(request: object) -> dict[str, list[str]]:
+    # Verify refresh cookie Path=/api/v1/auth prevents transmission to non-auth /api/v1 routes
+    @other_org_client.app.get("/api/v1/_test_cookie_scope")
+    def _inspect_non_auth_cookies(request: object) -> dict[str, list[str]]:
         from fastapi import Request
 
         assert isinstance(request, Request)
         return {"cookieNames": sorted(request.cookies.keys())}
 
-    cookie_probe = other_org_client.get("/api/v1/workspaces/_test_cookie_scope")
+    @other_org_client.app.get("/api/v1/auth/_test_cookie_scope")
+    def _inspect_auth_cookies(request: object) -> dict[str, list[str]]:
+        from fastapi import Request
+
+        assert isinstance(request, Request)
+        return {"cookieNames": sorted(request.cookies.keys())}
+
+    cookie_probe = other_org_client.get("/api/v1/_test_cookie_scope")
     assert cookie_probe.status_code == 200
     assert REFRESH_COOKIE_NAME not in cookie_probe.json()["cookieNames"]
+    assert ACCESS_COOKIE_NAME in cookie_probe.json()["cookieNames"]
+    assert CSRF_COOKIE_NAME in cookie_probe.json()["cookieNames"]
+
+    auth_cookie_probe = other_org_client.get("/api/v1/auth/_test_cookie_scope")
+    assert auth_cookie_probe.status_code == 200
+    assert REFRESH_COOKIE_NAME in auth_cookie_probe.json()["cookieNames"]
+    assert ACCESS_COOKIE_NAME in auth_cookie_probe.json()["cookieNames"]
+    assert CSRF_COOKIE_NAME in auth_cookie_probe.json()["cookieNames"]
 
     # Verify logout Set-Cookie headers clear all 3 cookies with Max-Age=0
     logout_resp = other_org_client.post(
@@ -1667,4 +1684,436 @@ def test_settings_null_rejection_duplicate_code_rollback_cookies_and_org_login_a
     assert fail_resp.json()["error"]["code"] == "INTERNAL_ERROR"
     assert fail_resp.json()["error"]["requestId"]
     assert db_session.scalar(select(User).where(User.email == rollback_email)) is None
+
+
+# ---------------------------------------------------------------------------
+# Batch 2.2 security, anti-orphan, lock-order & concurrency regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_prevent_orphaned_workspaces_when_suspending_or_removing_org_member(
+    make_client: Callable[..., TestClient],
+) -> None:
+    owner_client = make_client()
+    owner_reg = _register_user(
+        owner_client, prefix="orphan_owner", org_name="Anti Orphan Practice"
+    )
+    org_id = owner_reg["organization"]["id"]
+
+    # Owner provisions a dedicated second workspace and hands admin control to Member B
+    ws2_resp = owner_client.post(
+        f"/api/v1/organizations/{org_id}/workspaces",
+        headers=_csrf_headers(owner_client),
+        json={
+            "name": "Client Ledger Co",
+            "workspaceCode": f"WS-ORPH-{uuid.uuid4().hex[:6]}",
+            "legalEntityName": "Client Ledger Private Limited",
+        },
+    )
+    assert ws2_resp.status_code == 201
+    ws2_id = ws2_resp.json()["workspace"]["id"]
+
+    member_b_client = make_client()
+    member_b_reg = _register_user(member_b_client, prefix="orphan_adm_b")
+    member_b_email = member_b_reg["user"]["email"]
+    _onboard_user_to_org(
+        owner_client,
+        org_id=org_id,
+        member_client=member_b_client,
+        email=member_b_email,
+    )
+
+    add_b = owner_client.post(
+        f"/api/v1/workspaces/{ws2_id}/memberships",
+        headers=_csrf_headers(owner_client),
+        json={"email": member_b_email, "role": "WORKSPACE_ADMIN"},
+    )
+    assert add_b.status_code == 201
+
+    ws2_members = owner_client.get(f"/api/v1/workspaces/{ws2_id}/memberships").json()["items"]
+    owner_ws2_mem_id = next(
+        m["id"] for m in ws2_members if m["email"] == owner_reg["user"]["email"]
+    )
+    assert (
+        owner_client.delete(
+            f"/api/v1/workspaces/{ws2_id}/memberships/{owner_ws2_mem_id}",
+            headers=_csrf_headers(owner_client),
+        ).status_code
+        == 204
+    )
+
+    # Member B is now the sole active WORKSPACE_ADMIN on ws2
+    org_members = owner_client.get(
+        f"/api/v1/organizations/{org_id}/memberships"
+    ).json()["items"]
+    member_b_org_mem_id = next(
+        m["id"] for m in org_members if m["email"] == member_b_email
+    )
+
+    suspend_resp = owner_client.patch(
+        f"/api/v1/organizations/{org_id}/memberships/{member_b_org_mem_id}",
+        headers=_csrf_headers(owner_client),
+        json={"status": "SUSPENDED"},
+    )
+    assert suspend_resp.status_code == 409
+    assert suspend_resp.json()["error"]["code"] == "CANNOT_ORPHAN_WORKSPACE_ADMIN"
+    assert ws2_id in suspend_resp.json()["error"]["details"]["workspaceIds"]
+
+    delete_resp = owner_client.delete(
+        f"/api/v1/organizations/{org_id}/memberships/{member_b_org_mem_id}",
+        headers=_csrf_headers(owner_client),
+    )
+    assert delete_resp.status_code == 409
+    assert delete_resp.json()["error"]["code"] == "CANNOT_ORPHAN_WORKSPACE_ADMIN"
+
+    # Member B remains active and retains workspace access
+    assert member_b_client.get(f"/api/v1/workspaces/{ws2_id}").status_code == 200
+
+    # Hand off / add a second active WORKSPACE_ADMIN (Member C) to ws2
+    member_c_client = make_client()
+    member_c_reg = _register_user(member_c_client, prefix="orphan_adm_c")
+    member_c_email = member_c_reg["user"]["email"]
+    _onboard_user_to_org(
+        owner_client,
+        org_id=org_id,
+        member_client=member_c_client,
+        email=member_c_email,
+    )
+    add_c = member_b_client.post(
+        f"/api/v1/workspaces/{ws2_id}/memberships",
+        headers=_csrf_headers(member_b_client),
+        json={"email": member_c_email, "role": "WORKSPACE_ADMIN"},
+    )
+    assert add_c.status_code == 201
+
+    # Now suspending and removing Member B succeeds while Member C & Org Owner stay consistent
+    suspend_ok = owner_client.patch(
+        f"/api/v1/organizations/{org_id}/memberships/{member_b_org_mem_id}",
+        headers=_csrf_headers(owner_client),
+        json={"status": "SUSPENDED"},
+    )
+    assert suspend_ok.status_code == 200
+    assert member_b_client.get("/api/v1/auth/me").status_code == 401
+    assert member_c_client.get(f"/api/v1/workspaces/{ws2_id}").status_code == 200
+
+    remove_ok = owner_client.delete(
+        f"/api/v1/organizations/{org_id}/memberships/{member_b_org_mem_id}",
+        headers=_csrf_headers(owner_client),
+    )
+    assert remove_ok.status_code == 204
+    assert member_c_client.get(f"/api/v1/workspaces/{ws2_id}").status_code == 200
+    assert owner_client.get(f"/api/v1/organizations/{org_id}/memberships").status_code == 200
+
+
+def test_concurrent_invitation_acceptance_and_recreation_lock_order_on_postgresql(
+    make_client: Callable[..., TestClient],
+    db_session: Session,
+) -> None:
+    owner_client = make_client()
+    owner_reg = _register_user(
+        owner_client, prefix="inv_conc_owner", org_name="Concurrent Invites Firm"
+    )
+    org_id = owner_reg["organization"]["id"]
+
+    # 1. Two concurrent accept requests using the same invitation token -> [200, 409]
+    invitee_client_a = make_client()
+    invitee_reg = _register_user(invitee_client_a, prefix="inv_conc_user")
+    invitee_email = invitee_reg["user"]["email"]
+
+    invitee_client_b = make_client()
+    assert (
+        invitee_client_b.post(
+            "/api/v1/auth/login",
+            json={"email": invitee_email, "password": "StrongPractice!2026"},
+        ).status_code
+        == 200
+    )
+
+    inv_resp = owner_client.post(
+        f"/api/v1/organizations/{org_id}/invitations",
+        headers=_csrf_headers(owner_client),
+        json={"email": invitee_email, "role": "ORG_MEMBER"},
+    )
+    assert inv_resp.status_code == 201
+    raw_token = inv_resp.json()["inviteToken"]
+
+    accept_barrier = threading.Barrier(2)
+
+    def _accept(client: TestClient) -> tuple[int, str | None]:
+        accept_barrier.wait(timeout=5)
+        resp = client.post(
+            "/api/v1/organizations/invitations/accept",
+            headers=_csrf_headers(client),
+            json={"token": raw_token},
+        )
+        code = resp.json()["error"]["code"] if resp.status_code >= 400 else None
+        return resp.status_code, code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        r1 = pool.submit(_accept, invitee_client_a)
+        r2 = pool.submit(_accept, invitee_client_b)
+        results = sorted([r1.result(timeout=15), r2.result(timeout=15)])
+
+    assert results == [(200, None), (409, "INVITATION_EXPIRED_OR_USED")]
+    mem_rows = list(
+        db_session.scalars(
+            select(OrganizationMembership).where(
+                OrganizationMembership.organization_id == uuid.UUID(org_id),
+                OrganizationMembership.user_id == uuid.UUID(invitee_reg["user"]["id"]),
+            )
+        )
+    )
+    assert len(mem_rows) == 1
+
+    # 2. Invitation re-creation racing with acceptance (Organization -> OrganizationInvitation lock order)
+    for round_idx in range(3):
+        racer_client = make_client()
+        racer_email = _register_user(
+            racer_client, prefix=f"inv_race_{round_idx}"
+        )["user"]["email"]
+        seed_inv = owner_client.post(
+            f"/api/v1/organizations/{org_id}/invitations",
+            headers=_csrf_headers(owner_client),
+            json={"email": racer_email, "role": "ORG_MEMBER"},
+        )
+        assert seed_inv.status_code == 201
+        seed_token = seed_inv.json()["inviteToken"]
+
+        race_barrier = threading.Barrier(2)
+
+        def _recreate() -> int:
+            race_barrier.wait(timeout=5)
+            return owner_client.post(
+                f"/api/v1/organizations/{org_id}/invitations",
+                headers=_csrf_headers(owner_client),
+                json={"email": racer_email, "role": "ORG_ADMIN"},
+            ).status_code
+
+        def _accept_seed() -> int:
+            race_barrier.wait(timeout=5)
+            return racer_client.post(
+                "/api/v1/organizations/invitations/accept",
+                headers=_csrf_headers(racer_client),
+                json={"token": seed_token},
+            ).status_code
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_create = pool.submit(_recreate)
+            f_accept = pool.submit(_accept_seed)
+            create_status = f_create.result(timeout=15)
+            accept_status = f_accept.result(timeout=15)
+
+        assert create_status == 201
+        assert accept_status in (200, 409)
+
+
+def test_concurrent_duplicate_email_and_workspace_membership_races_on_postgresql(
+    make_client: Callable[..., TestClient],
+) -> None:
+    # 1. Concurrent duplicate email registration -> [201, 409] without 500
+    reg_a = make_client()
+    reg_b = make_client()
+    shared_email = f"dup.conc.{uuid.uuid4().hex[:8]}@example.invalid"
+    reg_barrier = threading.Barrier(2)
+
+    def _submit_reg(client: TestClient, org_suffix: str) -> tuple[int, str | None]:
+        reg_barrier.wait(timeout=5)
+        resp = client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": shared_email,
+                "password": "StrongPractice!2026",
+                "fullName": "Concurrent Registrar",
+                "organizationName": f"Concurrent Reg Firm {org_suffix}",
+            },
+        )
+        code = resp.json()["error"]["code"] if resp.status_code >= 400 else None
+        return resp.status_code, code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_reg_a = pool.submit(_submit_reg, reg_a, "A")
+        f_reg_b = pool.submit(_submit_reg, reg_b, "B")
+        reg_results = sorted([f_reg_a.result(timeout=15), f_reg_b.result(timeout=15)])
+
+    assert reg_results == [(201, None), (409, "EMAIL_ALREADY_EXISTS")]
+
+    # 2. Concurrent duplicate workspace membership addition -> [201, 409] without 500
+    admin_one = make_client()
+    admin_reg = _register_user(
+        admin_one, prefix="ws_dup_adm1", org_name="Workspace Race Practice"
+    )
+    org_id = admin_reg["organization"]["id"]
+    ws_id = admin_reg["workspace"]["workspaceId"]
+    admin_email = admin_reg["user"]["email"]
+
+    admin_two = make_client()
+    assert (
+        admin_two.post(
+            "/api/v1/auth/login",
+            json={"email": admin_email, "password": "StrongPractice!2026"},
+        ).status_code
+        == 200
+    )
+
+    collab_client = make_client()
+    collab_email = _register_user(collab_client, prefix="ws_dup_collab")["user"]["email"]
+    _onboard_user_to_org(
+        admin_one,
+        org_id=org_id,
+        member_client=collab_client,
+        email=collab_email,
+    )
+
+    ws_barrier = threading.Barrier(2)
+
+    def _add_ws_mem(client: TestClient) -> tuple[int, str | None]:
+        ws_barrier.wait(timeout=5)
+        resp = client.post(
+            f"/api/v1/workspaces/{ws_id}/memberships",
+            headers=_csrf_headers(client),
+            json={"email": collab_email, "role": "REVIEWER"},
+        )
+        code = resp.json()["error"]["code"] if resp.status_code >= 400 else None
+        return resp.status_code, code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_ws1 = pool.submit(_add_ws_mem, admin_one)
+        f_ws2 = pool.submit(_add_ws_mem, admin_two)
+        ws_results = sorted([f_ws1.result(timeout=15), f_ws2.result(timeout=15)])
+
+    assert ws_results == [(201, None), (409, "MEMBERSHIP_ALREADY_EXISTS")]
+
+
+def test_cross_ip_account_lockout_prevention_and_trusted_proxy_headers(
+    pg_test_url: str,
+) -> None:
+    clean_engine = create_engine(pg_test_url, pool_pre_ping=True)
+    with clean_engine.begin() as conn:
+        conn.execute(text("DELETE FROM auth_rate_limit_buckets"))
+    clean_engine.dispose()
+
+    proxy_settings = Settings(
+        _env_file=None,
+        app_env="test",
+        database_url=pg_test_url,
+        jwt_secret_key=TEST_JWT_SECRET,
+        cookie_secure=False,
+        cors_origins=["http://localhost:3000"],
+        trusted_proxies=["10.0.0.0/8"],
+        rate_limit_enabled=True,
+        rate_limit_window_seconds=60,
+        login_rate_limit_max_attempts=2,
+        register_rate_limit_max_attempts=20,
+        refresh_rate_limit_max_attempts=20,
+    )
+
+    class _PeerIpAsgiWrapper:
+        def __init__(self, inner_app: object, peer_ip: str) -> None:
+            self._inner_app = inner_app
+            self._peer_ip = peer_ip
+
+        async def __call__(self, scope: dict, receive: object, send: object) -> None:
+            if scope.get("type") == "http":
+                patched = dict(scope)
+                patched["client"] = (self._peer_ip, 50000)
+                await self._inner_app(patched, receive, send)  # type: ignore[misc]
+                return
+            await self._inner_app(scope, receive, send)  # type: ignore[misc]
+
+    app = create_app(proxy_settings)
+    with TestClient(app):
+        trusted_proxy_client = TestClient(_PeerIpAsgiWrapper(app, "10.0.0.5"))
+        victim_reg = _register_user(trusted_proxy_client, prefix="victim_rl")
+        victim_email = victim_reg["user"]["email"]
+
+        # Attacker IP 203.0.113.10 (behind trusted proxy 10.0.0.5) exhausts login limit
+        for _ in range(2):
+            bad = trusted_proxy_client.post(
+                "/api/v1/auth/login",
+                headers={"X-Forwarded-For": "203.0.113.10"},
+                json={"email": victim_email, "password": "WrongPassword!2026"},
+            )
+            assert bad.status_code == 401
+
+        attacker_blocked = trusted_proxy_client.post(
+            "/api/v1/auth/login",
+            headers={"X-Forwarded-For": "203.0.113.10"},
+            json={"email": victim_email, "password": "WrongPassword!2026"},
+        )
+        assert attacker_blocked.status_code == 429
+        assert attacker_blocked.json()["error"]["code"] == "RATE_LIMITED"
+        assert int(attacker_blocked.headers["Retry-After"]) >= 1
+
+        # Legitimate user from another IP 198.51.100.25 MUST NOT be locked out
+        legit_login = trusted_proxy_client.post(
+            "/api/v1/auth/login",
+            headers={"X-Forwarded-For": "198.51.100.25"},
+            json={"email": victim_email, "password": "StrongPractice!2026"},
+        )
+        assert legit_login.status_code == 200
+
+        # Untrusted direct peer 198.51.100.99 cannot bypass rate limits by spoofing X-Forwarded-For
+        untrusted_client = TestClient(_PeerIpAsgiWrapper(app, "198.51.100.99"))
+        for spoof_idx in range(2):
+            resp = untrusted_client.post(
+                "/api/v1/auth/login",
+                headers={"X-Forwarded-For": f"203.0.113.{200 + spoof_idx}"},
+                json={"email": victim_email, "password": "WrongPassword!2026"},
+            )
+            assert resp.status_code == 401
+
+        spoof_blocked = untrusted_client.post(
+            "/api/v1/auth/login",
+            headers={"X-Forwarded-For": "203.0.113.250"},
+            json={"email": victim_email, "password": "WrongPassword!2026"},
+        )
+        assert spoof_blocked.status_code == 429
+
+
+def test_rate_limiter_database_failure_fails_closed_without_secret_leak(
+    pg_test_url: str,
+) -> None:
+    from sqlalchemy.exc import OperationalError
+
+    rl_settings = Settings(
+        _env_file=None,
+        app_env="test",
+        database_url=pg_test_url,
+        jwt_secret_key=TEST_JWT_SECRET,
+        cookie_secure=False,
+        cors_origins=["http://localhost:3000"],
+        rate_limit_enabled=True,
+    )
+    app = create_app(rl_settings)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        class _FailingRateLimitSession:
+            def __enter__(self) -> _FailingRateLimitSession:
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def execute(self, *args: object, **kwargs: object) -> object:
+                raise OperationalError(
+                    "INSERT INTO auth_rate_limit_buckets",
+                    {},
+                    Exception("FATAL: supersecret_rl_db_password"),
+                )
+
+        app.state.session_factory = lambda: _FailingRateLimitSession()
+
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "someone@example.invalid",
+                "password": "StrongPractice!2026",
+            },
+        )
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["error"]["code"] == "INTERNAL_ERROR"
+        assert body["error"]["requestId"]
+        assert "supersecret_rl_db_password" not in resp.text
+        assert ACCESS_COOKIE_NAME not in resp.headers.get("set-cookie", "")
+
 

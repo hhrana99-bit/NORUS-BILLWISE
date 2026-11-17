@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 from functools import lru_cache
 from typing import Annotated, Any, Literal
@@ -7,6 +8,22 @@ from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+def _parse_string_list(value: Any, *, field_name: str) -> list[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        if stripped.startswith("["):
+            parsed = json.loads(stripped)
+            if not isinstance(parsed, list):
+                raise ValueError(f"{field_name} JSON value must be a list of strings.")
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        return [item.strip() for item in stripped.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    raise ValueError(f"{field_name} must be a comma-separated string or list of strings.")
 
 
 class Settings(BaseSettings):
@@ -40,6 +57,13 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:3000"],
         description="Explicit allowed browser origins; '*' is prohibited when credentials are enabled.",
     )
+    trusted_proxies: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description=(
+            "Explicit trusted reverse-proxy IPs or CIDR ranges permitted to supply "
+            "X-Forwarded-For. Empty disables forwarded-header trust."
+        ),
+    )
     document_storage_root: str = "./var/documents"
     db_echo: bool = False
     access_token_expire_minutes: int = 15
@@ -56,19 +80,12 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: Any) -> list[str]:
-        if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                return []
-            if stripped.startswith("["):
-                parsed = json.loads(stripped)
-                if not isinstance(parsed, list):
-                    raise ValueError("CORS_ORIGINS JSON value must be a list of strings.")
-                return [str(item).strip() for item in parsed if str(item).strip()]
-            return [item.strip() for item in stripped.split(",") if item.strip()]
-        if isinstance(value, (list, tuple, set)):
-            return [str(item).strip() for item in value if str(item).strip()]
-        raise ValueError("CORS_ORIGINS must be a comma-separated string or list of strings.")
+        return _parse_string_list(value, field_name="CORS_ORIGINS")
+
+    @field_validator("trusted_proxies", mode="before")
+    @classmethod
+    def parse_trusted_proxies(cls, value: Any) -> list[str]:
+        return _parse_string_list(value, field_name="TRUSTED_PROXIES")
 
     @model_validator(mode="after")
     def validate_security_and_database(self) -> Settings:
@@ -108,6 +125,28 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "CORS_ORIGINS cannot include wildcard '*' when cookie credentials are enabled."
                 )
+
+        normalized_proxies: list[str] = []
+        for raw_proxy in self.trusted_proxies:
+            cleaned = raw_proxy.strip()
+            if not cleaned:
+                continue
+            if cleaned == "*":
+                raise ValueError(
+                    "TRUSTED_PROXIES cannot use wildcard '*'; specify explicit proxy IPs or CIDRs."
+                )
+            try:
+                network = ipaddress.ip_network(cleaned, strict=False)
+            except ValueError as exc:
+                raise ValueError(
+                    f"TRUSTED_PROXIES contains invalid IP or CIDR {cleaned!r}."
+                ) from exc
+            if network.prefixlen == 0:
+                raise ValueError(
+                    "TRUSTED_PROXIES cannot use overly broad default routes (0.0.0.0/0 or ::/0)."
+                )
+            normalized_proxies.append(str(network))
+        self.trusted_proxies = normalized_proxies
 
         secret_value = self.jwt_secret_key.get_secret_value().strip()
         if len(secret_value) < 32:

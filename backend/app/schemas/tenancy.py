@@ -123,6 +123,10 @@ class OrganizationInvitationDto(ApiModel):
     invite_token: str | None = None
 
 
+class OrganizationInvitationListResponse(ApiModel):
+    items: list[OrganizationInvitationDto]
+
+
 class OrganizationInvitationAcceptRequest(ApiModel):
     token: str = Field(..., min_length=16, max_length=255)
 

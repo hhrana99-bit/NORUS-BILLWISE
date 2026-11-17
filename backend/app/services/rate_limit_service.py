@@ -152,7 +152,7 @@ def enforce_auth_rate_limit(
             acct_part = _hash_identifier(account_identifier)
             check_and_increment_bucket(
                 rl_db,
-                bucket_key=f"{action}:acct:{acct_part}",
+                bucket_key=f"{action}:ip_acct:{ip_part}:{acct_part}",
                 max_attempts=max_attempts,
                 window_seconds=window_seconds,
             )

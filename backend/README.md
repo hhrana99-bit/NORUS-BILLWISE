@@ -2,7 +2,7 @@
 
 **Company:** NORUS AI  
 **Product:** NORUS BILLWISE (*Beyond the World.*)  
-**Current Milestone:** Task 002.3 Batch 2.1 — Security Remediation, Reliability & Regression Testing
+**Current Milestone:** Task 002.3 Batch 2.2 — Critical Remediation & Regression Tests
 
 ---
 
@@ -135,13 +135,18 @@ Key environment variables (`backend/.env.example`):
 | `JWT_ISSUER` / `JWT_AUDIENCE` | Expected JWT `iss` and `aud` claims |
 | `COOKIE_SECURE` | Cookie `Secure` flag (`true` required in staging/production) |
 | `CORS_ORIGINS` | Comma-separated string or JSON array of explicit origins (wildcard `*` prohibited) |
+| `TRUSTED_PROXIES` | Explicit trusted reverse-proxy IPs or CIDR ranges allowed to supply `X-Forwarded-For` (default empty `[]`) |
 | `DOCUMENT_STORAGE_ROOT` | Local filesystem root for document storage adapter (`./var/documents`) |
 | `INVITATION_EXPIRE_HOURS` | Organization invitation lifetime in hours (default `72`) |
 | `RATE_LIMIT_ENABLED` | Enable PostgreSQL-backed auth rate limiting (default `true`) |
 | `RATE_LIMIT_WINDOW_SECONDS` | Fixed window duration in seconds for auth rate limits (default `60`) |
-| `LOGIN_RATE_LIMIT_MAX_ATTEMPTS` | Max `/auth/login` attempts per window per IP / account (default `10`) |
+| `LOGIN_RATE_LIMIT_MAX_ATTEMPTS` | Max `/auth/login` attempts per window per IP and `(IP, account)` bucket (default `10`) |
 | `REGISTER_RATE_LIMIT_MAX_ATTEMPTS` | Max `/auth/register` attempts per window per IP (default `10`) |
 | `REFRESH_RATE_LIMIT_MAX_ATTEMPTS` | Max `/auth/refresh` attempts per window per IP (default `30`) |
+
+### Reverse-Proxy Deployment Note
+
+When running behind Nginx, AWS ALB, Cloud Run, or another L7 reverse proxy, set `TRUSTED_PROXIES` to the exact proxy IP(s) or private subnet CIDR(s) (e.g., `TRUSTED_PROXIES=["10.0.0.0/8"]`). `X-Forwarded-For` is walked right-to-left and ignored unless the immediate TCP peer matches `TRUSTED_PROXIES`. Leaving `TRUSTED_PROXIES` empty disables forwarding-header trust and falls back exclusively to `request.client.host`.
 
 ---
 
@@ -179,6 +184,6 @@ Both `test_migrations.py` and `test_auth_and_tenancy.py` validate `TEST_DATABASE
 
 ## 6. Implemented vs. Deferred Scope
 
-- **Implemented in Task 002.2 – 002.3 Batch 2.1:** Config & secrets guards, SQLAlchemy 2.0 ORM models + migrations `0001_initial_foundation` & `0002_org_invitations_and_rate_limits`, PostgreSQL 16 CI workflow, Argon2id + HS256 cookie auth, refresh rotation + token-family reuse detection, `Origin`/CSRF + PostgreSQL multi-worker rate limiting, organization memberships/invitations + workspaces/settings/memberships/audit-events endpoints, deterministic `FOR UPDATE` lock ordering, and Batch 2.1 security & concurrency regression tests.
+- **Implemented in Task 002.2 – 002.3 Batch 2.2:** Config & secrets guards, SQLAlchemy 2.0 ORM models + migrations `0001_initial_foundation` & `0002_invites_and_rate_limits`, PostgreSQL 16 CI workflow, Argon2id + HS256 cookie auth, refresh rotation + token-family reuse detection, `Origin`/CSRF + `(IP, account)` PostgreSQL multi-worker rate limiting + explicit `TRUSTED_PROXIES` handling, organization memberships/invitations (`{ "items": [...] }` envelope + anti-orphan workspace admin guard) + workspaces/settings/memberships/audit-events endpoints, deterministic `FOR UPDATE` lock ordering (`Organization` -> `OrganizationInvitation` / `Workspace` -> `WorkspaceMembership`), and Batch 2.2 security & concurrency regression tests.
 - **Not Implemented Yet (Task 002.4+):** Suppliers Master CRUD, Document upload/streaming, Invoices CRUD & GST/reconciliation engine, Human Review workflow (`/verify`, `/flag`, `/reopen`), Reporting CSV export, Frontend-to-Backend API integration, and OCR/AI extraction.
 - **Container Environment Note:** Inside the AI Studio container runtime (`Python 3.10.12`, no `pip`, `pytest`, or PostgreSQL server), only static Python syntax/bytecode compilation and Node.js frontend checks ran locally; `pytest`, `alembic upgrade head`, and live PostgreSQL 16 execution remain `NOT RUN` pending remote GitHub Actions CI or a local Python 3.12+ + PostgreSQL 16+ environment.
