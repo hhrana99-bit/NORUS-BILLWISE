@@ -57,6 +57,7 @@ pytest -v -ra
   - Permits only `localhost`, `127.0.0.1`, `::1`, or the CI service hostname `postgres`.
   - Requires explicit `NORUS_ALLOW_DESTRUCTIVE_MIGRATION_TEST=1`.
   - Skips cleanly during ordinary local `pytest` when `TEST_DATABASE_URL` is unset, unless `NORUS_REQUIRE_POSTGRES_TESTS=1` (used in CI) converts missing/unreachable PostgreSQL into an explicit test failure.
+  - Verifies that `0001_initial_foundation` wraps all check-constraint names in `op.f(...)` (preventing double `ck_` prefixing), inspects all live PostgreSQL check constraints (`ck_invoices_*`), and asserts PostgreSQL rejects invalid `VERIFIED`/soft-delete/negative/discount-mode inserts inside a rolled-back transaction.
   - Note: Real PostgreSQL 16 verification in this environment remains pending execution on GitHub Actions CI or a local Python 3.12+ + PostgreSQL 16+ machine.
 
 ## 4. Browser QA Coverage (Executed in Task 001.3 via Playwright Chromium)

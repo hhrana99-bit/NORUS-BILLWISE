@@ -49,7 +49,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "char_length(trim(name)) > 0",
-            name="ck_organizations_name_not_empty",
+            name=op.f("ck_organizations_name_not_empty"),
         ),
         sa.PrimaryKeyConstraint("id", name="pk_organizations"),
         sa.UniqueConstraint("slug", name="uq_organizations_slug"),
@@ -278,11 +278,11 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "require_human_review = true",
-            name="ck_workspace_settings_human_review_required",
+            name=op.f("ck_workspace_settings_human_review_required"),
         ),
         sa.CheckConstraint(
             "rounding_tolerance >= 0 AND rounding_tolerance <= 10.00",
-            name="ck_workspace_settings_rounding_tolerance_bounds",
+            name=op.f("ck_workspace_settings_rounding_tolerance_bounds"),
         ),
         sa.ForeignKeyConstraint(
             ["workspace_id"],
@@ -320,11 +320,11 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "role IN ('ORG_OWNER', 'ORG_ADMIN', 'ORG_MEMBER')",
-            name="ck_organization_memberships_org_membership_role_valid",
+            name=op.f("ck_organization_memberships_org_membership_role_valid"),
         ),
         sa.CheckConstraint(
             "status IN ('ACTIVE', 'SUSPENDED')",
-            name="ck_organization_memberships_org_membership_status_valid",
+            name=op.f("ck_organization_memberships_org_membership_status_valid"),
         ),
         sa.ForeignKeyConstraint(
             ["organization_id"],
@@ -378,11 +378,11 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "role IN ('WORKSPACE_ADMIN', 'REVIEWER', 'UPLOADER', 'VIEWER')",
-            name="ck_workspace_memberships_ws_membership_role_valid",
+            name=op.f("ck_workspace_memberships_ws_membership_role_valid"),
         ),
         sa.CheckConstraint(
             "status IN ('ACTIVE', 'SUSPENDED')",
-            name="ck_workspace_memberships_ws_membership_status_valid",
+            name=op.f("ck_workspace_memberships_ws_membership_status_valid"),
         ),
         sa.ForeignKeyConstraint(
             ["invited_by_user_id"],
@@ -454,7 +454,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "status IN ('VERIFIED', 'NEEDS_VERIFICATION', 'FLAGGED')",
-            name="ck_suppliers_supplier_status_valid",
+            name=op.f("ck_suppliers_supplier_status_valid"),
         ),
         sa.ForeignKeyConstraint(
             ["workspace_id"],
@@ -509,15 +509,15 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "byte_size > 0 AND byte_size <= 15728640",
-            name="ck_documents_document_byte_size_bounds",
+            name=op.f("ck_documents_document_byte_size_bounds"),
         ),
         sa.CheckConstraint(
             "page_count >= 1",
-            name="ck_documents_document_page_count_min",
+            name=op.f("ck_documents_document_page_count_min"),
         ),
         sa.CheckConstraint(
             "scan_status IN ('PENDING', 'CLEAN', 'INFECTED', 'SKIPPED_DEV')",
-            name="ck_documents_document_scan_status_valid",
+            name=op.f("ck_documents_document_scan_status_valid"),
         ),
         sa.ForeignKeyConstraint(
             ["uploaded_by_user_id"],
@@ -716,37 +716,37 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "(deleted_at IS NULL) OR (status IN ('PENDING_REVIEW', 'FLAGGED'))",
-            name="ck_invoices_invoice_soft_delete_unverified_only",
+            name=op.f("ck_invoices_invoice_soft_delete_unverified_only"),
         ),
         sa.CheckConstraint(
             "(status != 'VERIFIED') OR (verified_by_user_id IS NOT NULL AND verified_at IS NOT NULL)",
-            name="ck_invoices_invoice_verified_requires_human_actor",
+            name=op.f("ck_invoices_invoice_verified_requires_human_actor"),
         ),
         sa.CheckConstraint(
             "discount_mode IN ('NONE', 'PRE_TAX', 'POST_TAX_COMMERCIAL')",
-            name="ck_invoices_invoice_discount_mode_valid",
+            name=op.f("ck_invoices_invoice_discount_mode_valid"),
         ),
         sa.CheckConstraint(
             "line_item_reconciliation_status IN ('NO_LINE_ITEMS', 'MATCHED', 'VARIANCE_WARNING')",
-            name="ck_invoices_invoice_line_item_reconciliation_valid",
+            name=op.f("ck_invoices_invoice_line_item_reconciliation_valid"),
         ),
         sa.CheckConstraint(
             "taxable_amount >= 0 AND discount_amount >= 0 AND cgst_amount >= 0 "
             "AND sgst_amount >= 0 AND igst_amount >= 0 AND cess_amount >= 0 "
             "AND freight_amount >= 0 AND other_charges_amount >= 0 AND total_amount >= 0",
-            name="ck_invoices_invoice_non_negative_amounts",
+            name=op.f("ck_invoices_invoice_non_negative_amounts"),
         ),
         sa.CheckConstraint(
             "reconciliation_status IN ('MATCHED', 'WITHIN_ROUNDING_TOLERANCE', 'VARIANCE_DETECTED', 'PENDING_INPUT')",
-            name="ck_invoices_invoice_reconciliation_status_valid",
+            name=op.f("ck_invoices_invoice_reconciliation_status_valid"),
         ),
         sa.CheckConstraint(
             "source_type IN ('MANUAL_UPLOAD', 'MANUAL_ENTRY', 'OCR_EXTRACTED', 'SEED_DEMO')",
-            name="ck_invoices_invoice_source_type_valid",
+            name=op.f("ck_invoices_invoice_source_type_valid"),
         ),
         sa.CheckConstraint(
             "status IN ('PENDING_REVIEW', 'VERIFIED', 'FLAGGED')",
-            name="ck_invoices_invoice_status_valid",
+            name=op.f("ck_invoices_invoice_status_valid"),
         ),
         sa.ForeignKeyConstraint(
             ["deleted_by_user_id"],
@@ -883,7 +883,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "quantity >= 0 AND tax_rate_percent >= 0 AND tax_rate_percent <= 100",
-            name="ck_invoice_line_items_line_item_quantity_tax_bounds",
+            name=op.f("ck_invoice_line_items_line_item_quantity_tax_bounds"),
         ),
         sa.ForeignKeyConstraint(
             ["workspace_id", "invoice_id"],
@@ -939,7 +939,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "status IN ('VERIFIED', 'NEEDS_REVIEW', 'FLAGGED')",
-            name="ck_invoice_field_verifications_field_verification_status_valid",
+            name=op.f("ck_invoice_field_verifications_field_verification_status_valid"),
         ),
         sa.ForeignKeyConstraint(
             ["verified_by_user_id"],
@@ -987,11 +987,11 @@ def upgrade() -> None:
         sa.Column("resolved_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint(
             "char_length(trim(reason_text)) > 0",
-            name="ck_invoice_review_flags_flag_reason_not_empty",
+            name=op.f("ck_invoice_review_flags_flag_reason_not_empty"),
         ),
         sa.CheckConstraint(
             "status IN ('OPEN', 'RESOLVED', 'DISMISSED')",
-            name="ck_invoice_review_flags_flag_status_valid",
+            name=op.f("ck_invoice_review_flags_flag_status_valid"),
         ),
         sa.ForeignKeyConstraint(
             ["created_by_user_id"],
@@ -1107,7 +1107,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "tone IN ('neutral', 'success', 'warning')",
-            name="ck_audit_events_audit_event_tone_valid",
+            name=op.f("ck_audit_events_audit_event_tone_valid"),
         ),
         sa.ForeignKeyConstraint(
             ["actor_user_id"],

@@ -62,16 +62,26 @@ def test_domain_check_constraints_and_composite_tenant_fks_exist() -> None:
         for constraint in invoices_table.constraints
         if isinstance(constraint, CheckConstraint)
     }
-    assert "ck_invoices_invoice_verified_requires_human_actor" in invoice_checks
-    assert "ck_invoices_invoice_soft_delete_unverified_only" in invoice_checks
-    assert "ck_invoices_invoice_line_item_reconciliation_valid" in invoice_checks
+    assert invoice_checks == {
+        "ck_invoices_invoice_discount_mode_valid",
+        "ck_invoices_invoice_reconciliation_status_valid",
+        "ck_invoices_invoice_line_item_reconciliation_valid",
+        "ck_invoices_invoice_status_valid",
+        "ck_invoices_invoice_source_type_valid",
+        "ck_invoices_invoice_non_negative_amounts",
+        "ck_invoices_invoice_verified_requires_human_actor",
+        "ck_invoices_invoice_soft_delete_unverified_only",
+    }
 
     ws_checks = {
         constraint.name
         for constraint in ws_settings_table.constraints
         if isinstance(constraint, CheckConstraint)
     }
-    assert "ck_workspace_settings_human_review_required" in ws_checks
+    assert ws_checks == {
+        "ck_workspace_settings_human_review_required",
+        "ck_workspace_settings_rounding_tolerance_bounds",
+    }
 
     invoice_fk_names = {fk.name for fk in invoices_table.foreign_key_constraints}
     assert "fk_invoices_workspace_supplier" in invoice_fk_names
@@ -86,6 +96,20 @@ def test_domain_check_constraints_and_composite_tenant_fks_exist() -> None:
         fk.name for fk in Base.metadata.tables["review_actions"].foreign_key_constraints
     }
     assert "fk_review_actions_workspace_invoice" in action_fk_names
+
+
+def test_metadata_check_constraints_have_no_duplicate_prefixes_and_fit_postgres_limit() -> None:
+    for table_name, table in Base.metadata.tables.items():
+        for constraint in table.constraints:
+            if isinstance(constraint, CheckConstraint):
+                assert constraint.name is not None
+                assert constraint.name.startswith(f"ck_{table_name}_")
+                assert not constraint.name.startswith(f"ck_{table_name}_ck_"), (
+                    f"Duplicate ck_ prefix detected on {table_name}: {constraint.name}"
+                )
+                assert len(constraint.name) <= 63, (
+                    f"PostgreSQL identifier exceeds 63 bytes: {constraint.name}"
+                )
 
 
 def test_audit_events_maps_event_metadata_to_metadata_column() -> None:
