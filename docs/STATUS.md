@@ -1,38 +1,42 @@
 # STATUS — Project Progress
 
-**Current Milestone:** Task 002.2 — Backend Foundation, Database Engine & Initial Migrations  
-**Status:** Source & Tests Written / Environment Verification Partial (Static compile & frontend CI pass; Python runtime, `pytest`, and PostgreSQL `alembic` execution require Python 3.12+ + PostgreSQL outside this container)
+**Current Milestone:** Task 002.3 Batch 1 — Dependency Compatibility, Migration Safety Hardening & PostgreSQL 16 Backend CI  
+**Status:** Batch 1 Changes Implemented Locally / Runtime & PostgreSQL Execution Pending Remote CI (`Python 3.12` + `PostgreSQL 16` unavailable inside AI Studio container)
 
 ---
 
-## Completed Work in Task 002.2
+## Completed Work in Task 002.3 Batch 1
 
-1. **Portable `/backend` Service Skeleton**
-   - Created `backend/pyproject.toml`, `backend/requirements.txt`, `backend/.env.example`, and `backend/.gitignore` using pinned dependencies (`fastapi`, `uvicorn`, `pydantic`, `pydantic-settings`, `sqlalchemy`, `psycopg[binary]`, `alembic`, `python-dotenv`, `pytest`, `httpx`).
-   - Created `app/core/config.py` (`Settings(BaseSettings)` enforcing PostgreSQL URLs, `>=32`-char `JWT_SECRET_KEY`, explicit `CORS_ORIGINS` without `*`, `COOKIE_SECURE=true` in staging/production, and credential redaction) and `app/core/logging.py`.
-   - Created `app/schemas/base.py` (`ApiModel` with `to_camel`, `populate_by_name=True`, `from_attributes=True`, `extra="forbid"`, plus `HealthResponse`, `ReadyResponse`, `ErrorDetail`, `ErrorResponse`).
-   - Created `app/main.py` (`create_app()` factory + lazy `app` export, CORS middleware, lifespan engine cleanup) and `app/api/v1/health.py` (`GET /api/v1/health` and `GET /api/v1/ready` returning `camelCase` JSON with 503 credential-safe DB failure responses).
-2. **SQLAlchemy 2.0 Engine, Models & Alembic Migration**
-   - Created `app/db/base.py` (deterministic PostgreSQL naming convention) and `app/db/session.py` (`create_db_engine`, `create_session_factory`, `get_db`).
-   - Implemented all 15 ORM models matching `docs/DATABASE_SCHEMA.md` across `app/models/tenancy.py`, `app/models/accounting.py`, `app/models/review.py`, and `app/models/__init__.py` (`organizations`, `users`, `user_sessions`, `workspaces`, `workspace_settings`, `organization_memberships`, `workspace_memberships`, `suppliers`, `documents`, `invoices`, `invoice_line_items`, `invoice_field_verifications`, `invoice_review_flags`, `review_actions`, `audit_events`).
-   - Configured Alembic (`backend/alembic.ini`, `backend/alembic/env.py`, `backend/alembic/script.py.mako`) and authored `0001_initial_foundation` (`upgrade()` + full reverse `downgrade()`).
-3. **Backend Test Suite (`backend/tests/`) & Documentation (`backend/README.md`)**
-   - Authored isolated `pytest` tests in `test_config.py`, `test_schemas.py`, `test_health_and_app.py`, `test_models.py`, and `test_migrations.py` (real PostgreSQL migration upgrade/downgrade test that skips cleanly when `TEST_DATABASE_URL` / PostgreSQL is unavailable).
-4. **Frontend Preservation**
-   - Kept the verified React 19 + TypeScript + Vite frontend (`src/`, `tests/`, `package.json`, `vite.config.ts`) completely intact and passing `npm run lint`, `npm test`, and `npm run build`.
+1. **Dependency Compatibility (`backend/requirements.txt`, `backend/pyproject.toml`, `backend/tests/test_config.py`)**
+   - Updated `pydantic-settings` from `2.6.1` to `2.7.0` in both manifests so `from pydantic_settings import NoDecode` in `app/core/config.py` resolves cleanly alongside `pydantic==2.10.3`.
+   - Retained/expanded `test_config.py` regression coverage for comma-separated strings, JSON arrays, direct Python lists, wildcard rejection, and `NoDecode` import verification.
+2. **Migration Test Database Safety Hardening (`backend/tests/test_migrations.py`)**
+   - Added strict pre-connection guard (`validate_destructive_migration_target`) enforcing PostgreSQL schemes, exact DB name `norus_billwise_test`, approved local/CI hostnames (`localhost`, `127.0.0.1`, `::1`, `postgres`), explicit `NORUS_ALLOW_DESTRUCTIVE_MIGRATION_TEST=1` opt-in, clean skipping when `TEST_DATABASE_URL` is unset, explicit failure under `NORUS_REQUIRE_POSTGRES_TESTS=1`, and credential-free error messages.
+   - Added zero-connection unit tests proving production/staging/development/default/`postgres` DB names, remote hosts, malformed URLs, and missing flags fail safely before calling `create_engine` or Alembic.
+3. **PostgreSQL 16 GitHub Actions Backend CI (`.github/workflows/ci.yml`)**
+   - Preserved `verify-frontend` (Node 22), removed obsolete `task-001-2-remediation` branch filter while keeping `main` push/PR triggers, and added `verify-backend` with Python 3.12, PostgreSQL 16 (`norus_billwise_test` + `pg_isready` health check), `alembic upgrade head`, and `pytest -v -ra` with `NORUS_REQUIRE_POSTGRES_TESTS=1` and `NORUS_ALLOW_DESTRUCTIVE_MIGRATION_TEST=1`.
+
+---
+
+## Completed Work in Task 002.2 & 002.2B
+
+1. **Portable `/backend` Service Skeleton & ORM Models**
+   - Implemented FastAPI `create_app()`, `Settings` (`NoDecode` comma/JSON CORS parsing), `ApiModel` (`camelCase` wire format), `/api/v1/health` & `/api/v1/ready`, SQLAlchemy 2.0 base/session management, all 15 ORM models matching `docs/DATABASE_SCHEMA.md`, Alembic URL precedence fix, and `0001_initial_foundation` migration.
+2. **Frontend Preservation**
+   - Kept the React 19 + TypeScript + Vite frontend (`src/`, `tests/`, `package.json`, `vite.config.ts`) completely intact (`npm run lint`, `npm test`, `npm run build` passing).
 
 ---
 
 ## Completed Prior Milestones
 
 - **Task 002.1 & Task 002.1A:** Architecture & schema specification (`docs/BACKEND_ARCHITECTURE.md`, `docs/DATABASE_SCHEMA.md`, `docs/API_CONTRACT.md`) finalizing `camelCase` API JSON, `HttpOnly`/`Secure`/`SameSite=Lax` cookie + CSRF auth, advisory line-item reconciliation warnings, and `WORKSPACE_ADMIN`-only soft deletion of unverified invoices.
-- **Task 001 – 001.3:** React 19 + TypeScript + Tailwind CSS v4 frontend prototype, Playwright real-Chromium QA (`375px`, `768px`, `1280px` × 6 routes), 11 service unit tests, and `.github/workflows/ci.yml`.
+- **Task 001 – 001.3:** React 19 + TypeScript + Tailwind CSS v4 frontend prototype, Playwright real-Chromium QA (`375px`, `768px`, `1280px` × 6 routes), 11 service unit tests, and initial CI.
 
 ---
 
 ## Implemented vs. Deferred Breakdown
 
 - **Implemented & Verified in Frontend (`src/`):** React SPA with fictional Indian GST sample data, `localStorage` (`v2`) persistence, CSV formula-safe export, and browser-local file staging.
-- **Implemented in `/backend` (Statically Verified Only):** FastAPI service skeleton, `Settings`, `ApiModel`, `/api/v1/health` & `/api/v1/ready`, SQLAlchemy 2.0 metadata (15 models), Alembic `0001_initial_foundation` migration, and `pytest` suite.
-- **Not Yet Executed in This Container Runtime (Run Locally / in CI with Python 3.12+ & PostgreSQL 16+):** `pip install -r requirements.txt`, `pytest`, live `uvicorn` boot, and `alembic upgrade head` / `downgrade base` (container has Python `3.10.12`, no `pip`/`uv`, no PostgreSQL server, and port `8000` occupied).
-- **Not Yet Implemented (Task 002.3+):** Cookie auth routes, CSRF guard, RBAC guards, supplier/document/invoice/review endpoints, reporting CSV API, frontend-to-backend integration, and Task 003+ OCR/AI extraction.
+- **Implemented in `/backend` & `.github/workflows/ci.yml` (Statically Verified Locally):** FastAPI service skeleton, `Settings` (`pydantic-settings==2.7.0`), `ApiModel`, `/api/v1/health` & `/api/v1/ready`, SQLAlchemy 2.0 metadata (15 models), Alembic `0001_initial_foundation`, hardened migration safety guards/tests, and PostgreSQL 16 CI workflow.
+- **Not Yet Executed in This Container Runtime (Pending GitHub Actions CI or Local Python 3.12+ / PostgreSQL 16+):** `pip install -r requirements.txt`, runtime `NoDecode` import, `pytest`, live `uvicorn` boot, and PostgreSQL 16 `alembic upgrade` / `downgrade` / `upgrade` verification.
+- **Not Yet Implemented (Task 002.3 Batch 2+):** Cookie auth routes, CSRF guard, RBAC guards, supplier/document/invoice/review endpoints, reporting CSV API, frontend-to-backend integration, and Task 003+ OCR/AI extraction.

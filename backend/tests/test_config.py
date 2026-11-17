@@ -118,3 +118,26 @@ def test_settings_accepts_comma_separated_and_json_cors_origins_env(
     monkeypatch.setenv("CORS_ORIGINS", "http://localhost:3000, *")
     with pytest.raises(ValidationError, match="wildcard"):
         Settings(_env_file=None)
+
+
+def test_settings_accepts_direct_python_list_cors_origins_and_nodecode_import() -> None:
+    from pydantic_settings import NoDecode
+
+    assert NoDecode is not None
+
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        database_url="postgresql+psycopg://postgres:realpass@localhost:5432/norus_billwise_test",
+        jwt_secret_key=VALID_SECRET,
+        cookie_secure=False,
+        cors_origins=[
+            " http://localhost:3000 ",
+            "https://portal.norusbillwise.example",
+        ],
+    )
+    assert settings.cors_origins == [
+        "http://localhost:3000",
+        "https://portal.norusbillwise.example",
+    ]
+

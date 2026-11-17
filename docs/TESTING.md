@@ -28,11 +28,38 @@ npm run build
 
 ## 2. GitHub Actions CI (`.github/workflows/ci.yml`)
 
-- **Triggers:** Pushes and pull requests targeting `main` and `task-001-2-remediation`.
-- **Environment:** `ubuntu-latest`, Node.js `22` with npm dependency cache.
-- **Steps:** `npm ci` -> `npm run lint` -> `npm test` -> `npm run build`. Any non-zero exit code fails the workflow; no secrets or paid services are used.
+- **Triggers:** Pushes and pull requests targeting `main`.
+- **Job 1 (`verify-frontend`):** `ubuntu-latest`, Node.js `22` with npm cache -> `npm ci` -> `npm run lint` -> `npm test` -> `npm run build`.
+- **Job 2 (`verify-backend`):** `ubuntu-latest`, Python `3.12` + `postgres:16` service container (`norus_billwise_test` with `pg_isready` health check). Installs `backend/requirements.txt`, compiles backend Python modules, verifies `NoDecode` import & `Settings`, runs `alembic upgrade head`, and runs `pytest -v -ra` with `NORUS_REQUIRE_POSTGRES_TESTS=1` and `NORUS_ALLOW_DESTRUCTIVE_MIGRATION_TEST=1` so PostgreSQL migration tests cannot silently skip in CI.
 
-## 3. Browser QA Coverage (Executed in Task 001.3 via Playwright Chromium)
+## 3. Backend Automated Tests & Destructive Migration Safety (`backend/tests/`)
+
+Run unit, configuration, schema, health/readiness, ORM metadata, and pre-connection migration safety tests without PostgreSQL:
+
+```bash
+cd backend
+pytest -v
+```
+
+Run live PostgreSQL migration verification (`upgrade -> downgrade -> upgrade`):
+
+```bash
+export TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/norus_billwise_test"
+export NORUS_ALLOW_DESTRUCTIVE_MIGRATION_TEST=1
+export NORUS_REQUIRE_POSTGRES_TESTS=1
+pytest -v -ra
+```
+
+- **Why the guard exists:** `test_alembic_upgrade_and_downgrade_on_postgresql` executes `alembic downgrade base`, which drops all database tables.
+- **Enforced guardrails (`backend/tests/test_migrations.py`):**
+  - Accepts only `postgresql://` or `postgresql+psycopg://` schemes.
+  - Requires the exact database name `norus_billwise_test`.
+  - Permits only `localhost`, `127.0.0.1`, `::1`, or the CI service hostname `postgres`.
+  - Requires explicit `NORUS_ALLOW_DESTRUCTIVE_MIGRATION_TEST=1`.
+  - Skips cleanly during ordinary local `pytest` when `TEST_DATABASE_URL` is unset, unless `NORUS_REQUIRE_POSTGRES_TESTS=1` (used in CI) converts missing/unreachable PostgreSQL into an explicit test failure.
+  - Note: Real PostgreSQL 16 verification in this environment remains pending execution on GitHub Actions CI or a local Python 3.12+ + PostgreSQL 16+ machine.
+
+## 4. Browser QA Coverage (Executed in Task 001.3 via Playwright Chromium)
 
 - **Viewports Tested:** `375x812` (mobile), `768x1024` (tablet), `1280x800` (desktop) across all 6 routes against `vite preview` (`18` viewport/route states verified for zero page-level horizontal overflow, zero unlabelled visible icon buttons, zero console/page errors, and zero failed internal asset requests).
 - **Workflows Verified in Browser:**
@@ -44,5 +71,4 @@ npm run build
   6. Settings persistence across reload, toggle suppression of duplicate/mismatch/notification triggers, and corrupted `localStorage` recovery.
   7. Mobile (`375px`) drawer/search `Escape` focus return and upload modal focus/keyboard checks.
 - **Untested / Demo-Only Limitations:** Native browser `beforeunload` dialog trigger was verified via event listener registration rather than browser unload dismissal; real server upload, OCR/AI extraction, and Excel export remain unimplemented demo boundaries until Task 002.
-
 
