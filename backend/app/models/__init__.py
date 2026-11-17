@@ -10,7 +10,9 @@ from app.models.accounting import (
 )
 from app.models.review import AuditEvent, InvoiceReviewFlag, ReviewAction
 from app.models.tenancy import (
+    AuthRateLimitBucket,
     Organization,
+    OrganizationInvitation,
     OrganizationMembership,
     User,
     UserSession,
@@ -21,6 +23,7 @@ from app.models.tenancy import (
 
 __all__ = [
     "AuditEvent",
+    "AuthRateLimitBucket",
     "Base",
     "Document",
     "Invoice",
@@ -28,6 +31,7 @@ __all__ = [
     "InvoiceLineItem",
     "InvoiceReviewFlag",
     "Organization",
+    "OrganizationInvitation",
     "OrganizationMembership",
     "ReviewAction",
     "Supplier",

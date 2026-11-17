@@ -1,1 +1,64 @@
-"""Domain service modules for authentication, tenancy, RBAC, and audit logging."""
+"""Domain services decoupled from HTTP transport concerns."""
+
+from app.services.audit_service import list_workspace_audit_events, record_audit_event
+from app.services.auth_service import (
+    get_user_memberships_snapshot,
+    login_user,
+    logout_all_sessions,
+    logout_session,
+    refresh_user_session,
+    register_user,
+    revoke_user_sessions,
+    validate_access_session,
+)
+from app.services.rate_limit_service import enforce_auth_rate_limit
+from app.services.tenancy_service import (
+    accept_organization_invitation,
+    add_workspace_membership,
+    create_organization,
+    create_organization_invitation,
+    create_workspace_in_organization,
+    get_workspace_settings,
+    list_organization_invitations,
+    list_organization_memberships,
+    list_user_organizations,
+    list_user_workspaces,
+    list_workspace_memberships,
+    remove_organization_membership,
+    remove_workspace_membership,
+    revoke_organization_invitation,
+    update_organization_membership,
+    update_workspace_membership,
+    update_workspace_settings,
+)
+
+__all__ = [
+    "accept_organization_invitation",
+    "add_workspace_membership",
+    "create_organization",
+    "create_organization_invitation",
+    "create_workspace_in_organization",
+    "enforce_auth_rate_limit",
+    "get_user_memberships_snapshot",
+    "get_workspace_settings",
+    "list_organization_invitations",
+    "list_organization_memberships",
+    "list_user_organizations",
+    "list_user_workspaces",
+    "list_workspace_memberships",
+    "list_workspace_audit_events",
+    "login_user",
+    "logout_all_sessions",
+    "logout_session",
+    "record_audit_event",
+    "refresh_user_session",
+    "register_user",
+    "remove_organization_membership",
+    "remove_workspace_membership",
+    "revoke_organization_invitation",
+    "revoke_user_sessions",
+    "update_organization_membership",
+    "update_workspace_membership",
+    "update_workspace_settings",
+    "validate_access_session",
+]

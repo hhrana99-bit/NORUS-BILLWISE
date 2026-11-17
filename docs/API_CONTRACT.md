@@ -14,8 +14,9 @@
 - **Browser Cookie Authentication & CSRF Protection:**
   - Authentication relies strictly on secure cookies (`norus_access_token` with `HttpOnly; Secure; SameSite=Lax; Path=/api/v1`, and `norus_refresh_token` with `HttpOnly; Secure; SameSite=Lax; Path=/api/v1/auth`).
   - **Tokens are never returned in JSON response bodies and must never be stored in `localStorage` or `sessionStorage`.** Frontend requests pass `credentials: 'include'`.
-  - Every state-changing request (`POST`, `PATCH`, `PUT`, `DELETE`) other than `/auth/login` and `/auth/register` requires a matching `X-CSRF-Token` header paired with the `norus_csrf_token` cookie (plus strict `Origin` / `Referer` validation against configured `CORS_ORIGINS`).
-- **Tenant Isolation Rule:** Every workspace endpoint carries `{workspaceId}` in the path. Requests for a `workspaceId` or child resource outside the authenticated user's active memberships return `404 Not Found` (preventing cross-tenant UUID enumeration).
+  - Every state-changing request (`POST`, `PATCH`, `PUT`, `DELETE`) other than `/auth/login` and `/auth/register` requires a matching `X-CSRF-Token` header paired with the `norus_csrf_token` cookie plus strict `Origin` / `Referer` validation against configured `CORS_ORIGINS`.
+  - `POST /auth/register` and `POST /auth/login` enforce `Origin` / `Referer` allowlist validation (rejecting mismatched origins globally and missing `Origin`/`Referer` in `staging`/`production` with `403 CSRF_TOKEN_INVALID`) without requiring a pre-existing CSRF cookie.
+- **Tenant Isolation Rule:** Every workspace endpoint carries `{workspaceId}` in the path. Requests for a `workspaceId` or child resource outside the authenticated user's active organization and workspace memberships return `404 Not Found` (preventing cross-tenant UUID enumeration).
 - **Standard Error Envelope:**
 
 ```json
@@ -39,8 +40,8 @@
 ## 2. Authentication Endpoints
 
 ### `POST /api/v1/auth/register`
-- **Purpose:** Register a new user account and optionally bootstrap an initial Organization + Workspace, setting authentication and CSRF cookies.
-- **Auth:** Public (rate-limited).
+- **Purpose:** Register a new user account and optionally bootstrap an initial Organization + Workspace, setting authentication and CSRF cookies. Password must contain at least 12 non-whitespace characters.
+- **Auth:** Public (`Origin`/`Referer`-validated, PostgreSQL multi-worker rate-limited).
 - **Request Body:**
   ```json
   {
@@ -52,11 +53,11 @@
   }
   ```
 - **Response (`201 Created`):** User profile and initial organization/workspace summary (no tokens in body); sets `Set-Cookie` for `norus_access_token`, `norus_refresh_token`, and `norus_csrf_token`.
-- **Errors:** `409 EMAIL_ALREADY_EXISTS`, `422 VALIDATION_ERROR`.
+- **Errors:** `403 CSRF_TOKEN_INVALID`, `409 EMAIL_ALREADY_EXISTS`, `409 ORGANIZATION_SLUG_CONFLICT`, `422 VALIDATION_ERROR`, `429 RATE_LIMITED` (`Retry-After` header).
 
 ### `POST /api/v1/auth/login`
-- **Purpose:** Authenticate user via Argon2id password check, create a `user_sessions` record, and issue `HttpOnly` access/refresh cookies plus `norus_csrf_token`.
-- **Auth:** Public (rate-limited).
+- **Purpose:** Authenticate user via Argon2id password check, create a `user_sessions` record, emit organization-scoped `auth.login` audit event (`workspace_id = null`), and issue `HttpOnly` access/refresh cookies plus `norus_csrf_token`.
+- **Auth:** Public (`Origin`/`Referer`-validated, PostgreSQL multi-worker rate-limited by IP and normalized account).
 - **Request Body:** `{ "email": "...", "password": "..." }`
 - **Response (`200 OK`):**
   ```json
@@ -69,13 +70,13 @@
   }
   ```
   Sets `Set-Cookie` headers (`norus_access_token`, `norus_refresh_token`, `norus_csrf_token`).
-- **Errors:** `401 INVALID_CREDENTIALS`, `403 ACCOUNT_DISABLED`, `429 RATE_LIMITED`.
+- **Errors:** `401 INVALID_CREDENTIALS`, `403 ACCOUNT_DISABLED`, `403 CSRF_TOKEN_INVALID`, `429 RATE_LIMITED` (`Retry-After` header).
 
 ### `POST /api/v1/auth/refresh`
 - **Purpose:** Validate and rotate the `norus_refresh_token` cookie, create a linked replacement `user_sessions` row, revoke the previous refresh row (`rotated_at`), and issue fresh access, refresh, and CSRF cookies.
-- **Auth:** Refresh cookie (`norus_refresh_token`) + `X-CSRF-Token` header.
+- **Auth:** Refresh cookie (`norus_refresh_token`) + `X-CSRF-Token` header (`Origin`/`Referer`-validated, PostgreSQL rate-limited).
 - **Response (`200 OK`):** `{ "refreshed": true, "sessionExpiresAt": "2026-11-30T10:45:00Z" }` + rotated `Set-Cookie` headers.
-- **Errors:** `401 SESSION_EXPIRED_OR_REVOKED` (triggers full token-family revocation if replay of a rotated token is detected), `403 CSRF_TOKEN_INVALID`.
+- **Errors:** `401 SESSION_EXPIRED_OR_REVOKED` (triggers full token-family revocation if replay of a rotated token is detected), `403 CSRF_TOKEN_INVALID`, `429 RATE_LIMITED` (`Retry-After` header).
 
 ### `POST /api/v1/auth/logout`
 - **Purpose:** Revoke current `user_sessions` row (`USER_LOGOUT`), immediately invalidate the `sid`-linked access cookie, and expire all three cookies (`Max-Age=0`).
@@ -107,8 +108,45 @@
 - **Request Body:** `{ "name": "...", "firmType": "...", "primaryContactEmail": "..." }`
 - **Response (`201 Created`):** Created organization DTO.
 
+### `GET /api/v1/organizations/{organizationId}/memberships`
+- **Purpose:** List organization members and roles.
+- **Auth:** `ORG_OWNER` or `ORG_ADMIN` of `{organizationId}`.
+- **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "organizationId": "uuid", "userId": "uuid", "email": "...", "fullName": "...", "role": "ORG_MEMBER", "status": "ACTIVE" }] }`.
+
+### `PATCH /api/v1/organizations/{organizationId}/memberships/{membershipId}`
+- **Purpose:** Update organization member role (`ORG_OWNER`/`ORG_ADMIN`/`ORG_MEMBER`) or status (`ACTIVE`/`SUSPENDED`). Suspensions/role changes immediately revoke target sessions; sole active `ORG_OWNER` cannot be downgraded or suspended (`409 CANNOT_DOWNGRADE_LAST_ORG_OWNER`).
+- **Auth:** `ORG_OWNER` or `ORG_ADMIN` (`ORG_OWNER` required to assign or alter `ORG_OWNER`) + CSRF.
+- **Response (`200 OK`):** Updated organization membership DTO.
+
+### `DELETE /api/v1/organizations/{organizationId}/memberships/{membershipId}`
+- **Purpose:** Remove an organization member, cascade-remove their workspace memberships inside that organization, and revoke their sessions (protects sole active `ORG_OWNER`).
+- **Auth:** `ORG_OWNER` or `ORG_ADMIN` (`ORG_OWNER` required to remove `ORG_OWNER`) + CSRF.
+- **Response (`204 No Content`)**
+
+### `POST /api/v1/organizations/{organizationId}/invitations`
+- **Purpose:** Issue an anti-enumeration invitation token (SHA-256 hashed at rest; raw `inviteToken` returned only once in the creation response). Does not disclose whether the invited email exists globally.
+- **Auth:** `ORG_OWNER` or `ORG_ADMIN` + CSRF.
+- **Request Body:** `{ "email": "staff@deshmukhca.example", "role": "ORG_MEMBER" }`
+- **Response (`201 Created`):** Invitation DTO including single-disclosure `inviteToken`.
+
+### `GET /api/v1/organizations/{organizationId}/invitations`
+- **Purpose:** List organization invitations (`inviteToken` is always omitted).
+- **Auth:** `ORG_OWNER` or `ORG_ADMIN`.
+
+### `DELETE /api/v1/organizations/{organizationId}/invitations/{invitationId}`
+- **Purpose:** Revoke a pending invitation (`409 INVITATION_ALREADY_ACCEPTED` if already used).
+- **Auth:** `ORG_OWNER` or `ORG_ADMIN` + CSRF.
+- **Response (`204 No Content`)**
+
+### `POST /api/v1/organizations/invitations/accept`
+- **Purpose:** Accept an active, unexpired organization invitation where the authenticated caller's verified email matches `invitedEmail`.
+- **Auth:** Authenticated user + CSRF.
+- **Request Body:** `{ "token": "..." }`
+- **Response (`200 OK`):** Joined organization DTO.
+- **Errors:** `403 INVITATION_EMAIL_MISMATCH`, `404 INVITATION_NOT_FOUND`, `409 INVITATION_EXPIRED_OR_USED`.
+
 ### `GET /api/v1/workspaces`
-- **Purpose:** List all active workspaces accessible to the authenticated user (filterable by `organizationId`).
+- **Purpose:** List all active workspaces accessible to the authenticated user (requiring active `WorkspaceMembership`, `OrganizationMembership`, `Workspace`, and `Organization`; filterable by `organizationId`).
 - **Auth:** Authenticated user.
 - **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "organizationId": "uuid", "name": "...", "workspaceCode": "...", "role": "REVIEWER" }] }`.
 
@@ -117,23 +155,24 @@
 - **Auth:** `ORG_OWNER` or `ORG_ADMIN` of `{organizationId}` + CSRF.
 - **Request Body:** `{ "name": "...", "workspaceCode": "...", "legalEntityName": "...", "companyGstin": "..." }`
 - **Response (`201 Created`):** Workspace + settings DTO.
+- **Errors:** `409 WORKSPACE_CODE_EXISTS`, `422 HUMAN_REVIEW_CANNOT_BE_DISABLED`.
 
 ### `GET /api/v1/workspaces/{workspaceId}`
 - **Purpose:** Fetch workspace metadata and caller's effective role.
-- **Auth:** Any active workspace member.
+- **Auth:** Any active workspace member holding an active organization membership.
 - **Response (`200 OK`):** Workspace summary + `currentUserRole`.
 
 ### `GET /api/v1/workspaces/{workspaceId}/settings`
 - **Purpose:** Retrieve `workspace_settings` (firm details, GST preferences, duplicate/mismatch toggles, rounding tolerance, notifications).
-- **Auth:** Any active workspace member.
+- **Auth:** Any active workspace member holding an active organization membership.
 - **Response (`200 OK`):** Settings DTO matching `WorkspaceSettings` fields plus `roundingTolerance`.
 
 ### `PATCH /api/v1/workspaces/{workspaceId}/settings`
-- **Purpose:** Update editable workspace settings. Backend rejects attempts to set `requireHumanReview = false`.
+- **Purpose:** Update editable workspace settings. Backend rejects `requireHumanReview = false`, explicit JSON `null` on non-nullable fields, and invalid GSTIN/PAN/currency/tolerance values (`companyGstin` and `companyPan` remain nullable).
 - **Auth:** `WORKSPACE_ADMIN` + CSRF.
-- **Request Body:** Partial settings update (`legalEntityName`, `companyGstin`, `enableDuplicateWarnings`, `autoFlagTaxMismatch`, `roundingTolerance`, `notifyFlaggedInvoices`, `notifyDailyDigest`, `notifyDuplicateAlerts`).
+- **Request Body:** Partial settings update (`legalEntityName`, `companyGstin`, `companyPan`, `enableDuplicateWarnings`, `autoFlagTaxMismatch`, `roundingTolerance`, `notifyFlaggedInvoices`, `notifyDailyDigest`, `notifyDuplicateAlerts`).
 - **Response (`200 OK`):** Updated settings DTO (`requireHumanReview` always `true`).
-- **Errors:** `422 HUMAN_REVIEW_CANNOT_BE_DISABLED`.
+- **Errors:** `422 HUMAN_REVIEW_CANNOT_BE_DISABLED`, `422 VALIDATION_ERROR`.
 
 ---
 
@@ -145,21 +184,21 @@
 - **Response (`200 OK`):** `{ "items": [{ "id": "uuid", "userId": "uuid", "email": "...", "fullName": "...", "role": "REVIEWER", "status": "ACTIVE" }] }`.
 
 ### `POST /api/v1/workspaces/{workspaceId}/memberships`
-- **Purpose:** Add an existing organization user (or invite by email) to the workspace with an explicit role.
-- **Auth:** `WORKSPACE_ADMIN` (or `ORG_ADMIN`) + CSRF.
+- **Purpose:** Grant an active member of the parent organization access to the workspace with an explicit role. Users must first be onboarded into the organization via `POST /organizations/{organizationId}/invitations` + `/invitations/accept`. Returns one uniform `404` response for unknown emails, non-members, and suspended organization members to prevent global email enumeration.
+- **Auth:** `WORKSPACE_ADMIN` + CSRF *(intentional strict workspace-level scoping; `ORG_ADMIN` does not implicitly bypass missing `WORKSPACE_ADMIN` membership unless also assigned to the workspace)*.
 - **Request Body:** `{ "email": "staff@deshmukhca.example", "role": "REVIEWER" }`
 - **Response (`201 Created`):** Membership DTO.
-- **Errors:** `409 MEMBERSHIP_ALREADY_EXISTS`.
+- **Errors:** `404 ORGANIZATION_MEMBER_NOT_FOUND`, `409 MEMBERSHIP_ALREADY_EXISTS`.
 
 ### `PATCH /api/v1/workspaces/{workspaceId}/memberships/{membershipId}`
-- **Purpose:** Update a member's `role` or `status` (`ACTIVE` / `SUSPENDED`) and revoke active user sessions if suspended or downgraded.
+- **Purpose:** Update a member's `role` or `status` (`ACTIVE` / `SUSPENDED`) and immediately revoke active sessions for the target user if suspended or downgraded/changed *(user-wide session revocation ensures immediate access/claim refresh)*.
 - **Auth:** `WORKSPACE_ADMIN` + CSRF.
 - **Request Body:** `{ "role": "VIEWER", "status": "ACTIVE" }`
 - **Response (`200 OK`):** Updated membership DTO.
 - **Errors:** `409 CANNOT_DOWNGRADE_LAST_ADMIN`.
 
 ### `DELETE /api/v1/workspaces/{workspaceId}/memberships/{membershipId}`
-- **Purpose:** Remove user access to the workspace (revokes target sessions for the workspace and prevents removing the sole remaining `WORKSPACE_ADMIN`).
+- **Purpose:** Remove user access to the workspace (revokes target user sessions and prevents removing the sole remaining `WORKSPACE_ADMIN`).
 - **Auth:** `WORKSPACE_ADMIN` + CSRF.
 - **Response (`204 No Content`)**
 

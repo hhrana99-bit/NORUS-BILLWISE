@@ -1,4 +1,4 @@
-"""Shared Pydantic schema exports."""
+"""Pydantic v2 camelCase API schemas for NORUS BILLWISE."""
 
 from app.schemas.auth import (
     LoginRequest,
@@ -27,7 +27,13 @@ from app.schemas.tenancy import (
     MembershipUpdateRequest,
     OrganizationCreateRequest,
     OrganizationDto,
+    OrganizationInvitationAcceptRequest,
+    OrganizationInvitationCreateRequest,
+    OrganizationInvitationDto,
     OrganizationListResponse,
+    OrganizationMembershipDto,
+    OrganizationMembershipListResponse,
+    OrganizationMembershipUpdateRequest,
     WorkspaceCreateRequest,
     WorkspaceDetailDto,
     WorkspaceListItemDto,
@@ -53,8 +59,14 @@ __all__ = [
     "MembershipUpdateRequest",
     "OrganizationCreateRequest",
     "OrganizationDto",
+    "OrganizationInvitationAcceptRequest",
+    "OrganizationInvitationCreateRequest",
+    "OrganizationInvitationDto",
     "OrganizationListResponse",
+    "OrganizationMembershipDto",
+    "OrganizationMembershipListResponse",
     "OrganizationMembershipSummaryDto",
+    "OrganizationMembershipUpdateRequest",
     "ReadyResponse",
     "RefreshResponse",
     "RegisterRequest",

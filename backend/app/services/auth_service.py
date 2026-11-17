@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import status
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -51,6 +52,10 @@ def _ensure_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _get_constraint_name(exc: IntegrityError) -> str | None:
+    return getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
 
 
 def generate_unique_org_slug(db: Session, org_name: str) -> str:
@@ -121,11 +126,17 @@ def get_user_memberships_snapshot(
                 WorkspaceMembership.workspace_id == Workspace.id,
             )
             .join(Organization, Organization.id == Workspace.organization_id)
+            .join(
+                OrganizationMembership,
+                (OrganizationMembership.organization_id == Organization.id)
+                & (OrganizationMembership.user_id == user_id),
+            )
             .where(
                 WorkspaceMembership.user_id == user_id,
                 WorkspaceMembership.status == "ACTIVE",
                 Workspace.is_active.is_(True),
                 Organization.is_active.is_(True),
+                OrganizationMembership.status == "ACTIVE",
             )
             .order_by(Workspace.created_at.asc())
         ).all()
@@ -227,95 +238,115 @@ def register_user(
             message="An account with this email address already exists.",
         )
 
-    user = User(
-        email=normalized_email,
-        full_name=full_name.strip(),
-        password_hash=hash_password(password),
-        is_active=True,
-        last_login_at=utc_now(),
-    )
-    db.add(user)
-    db.flush()
+    password_hash = hash_password(password)
 
-    org_bundle: tuple[Organization, OrganizationMembership] | None = None
-    ws_bundle: tuple[Workspace, WorkspaceMembership] | None = None
-    primary_org_id: uuid.UUID | None = None
-
-    if organization_name:
-        clean_org_name = organization_name.strip()
-        org = Organization(
-            name=clean_org_name,
-            slug=generate_unique_org_slug(db, clean_org_name),
-            firm_type=firm_type.strip(),
-            primary_contact_email=normalized_email,
+    try:
+        user = User(
+            email=normalized_email,
+            full_name=full_name.strip(),
+            password_hash=password_hash,
             is_active=True,
+            last_login_at=utc_now(),
         )
-        db.add(org)
+        db.add(user)
         db.flush()
 
-        org_membership = OrganizationMembership(
-            organization_id=org.id,
-            user_id=user.id,
-            role="ORG_OWNER",
-            status="ACTIVE",
-        )
-        db.add(org_membership)
+        org_bundle: tuple[Organization, OrganizationMembership] | None = None
+        ws_bundle: tuple[Workspace, WorkspaceMembership] | None = None
+        primary_org_id: uuid.UUID | None = None
 
-        workspace = Workspace(
-            organization_id=org.id,
-            name=clean_org_name,
-            workspace_code="WS-DEFAULT-001",
-            is_active=True,
-        )
-        db.add(workspace)
-        db.flush()
+        if organization_name:
+            clean_org_name = organization_name.strip()
+            org = Organization(
+                name=clean_org_name,
+                slug=generate_unique_org_slug(db, clean_org_name),
+                firm_type=firm_type.strip(),
+                primary_contact_email=normalized_email,
+                is_active=True,
+            )
+            db.add(org)
+            db.flush()
 
-        ws_settings = WorkspaceSettings(
-            workspace_id=workspace.id,
-            legal_entity_name=clean_org_name,
-            require_human_review=True,
-        )
-        db.add(ws_settings)
+            org_membership = OrganizationMembership(
+                organization_id=org.id,
+                user_id=user.id,
+                role="ORG_OWNER",
+                status="ACTIVE",
+            )
+            db.add(org_membership)
 
-        ws_membership = WorkspaceMembership(
-            workspace_id=workspace.id,
-            user_id=user.id,
-            role="WORKSPACE_ADMIN",
-            status="ACTIVE",
-            invited_by_user_id=user.id,
-        )
-        db.add(ws_membership)
-        db.flush()
+            workspace = Workspace(
+                organization_id=org.id,
+                name=clean_org_name,
+                workspace_code="WS-DEFAULT-001",
+                is_active=True,
+            )
+            db.add(workspace)
+            db.flush()
 
-        primary_org_id = org.id
-        org_bundle = (org, org_membership)
-        ws_bundle = (workspace, ws_membership)
+            ws_settings = WorkspaceSettings(
+                workspace_id=workspace.id,
+                legal_entity_name=clean_org_name,
+                require_human_review=True,
+            )
+            db.add(ws_settings)
 
-    issued = _issue_new_session(
-        db,
-        user=user,
-        organization_id=primary_org_id,
-        settings=settings,
-        ip_address=ip_address,
-        user_agent=user_agent,
-    )
+            ws_membership = WorkspaceMembership(
+                workspace_id=workspace.id,
+                user_id=user.id,
+                role="WORKSPACE_ADMIN",
+                status="ACTIVE",
+                invited_by_user_id=user.id,
+            )
+            db.add(ws_membership)
+            db.flush()
 
-    if primary_org_id is not None and ws_bundle is not None:
-        record_audit_event(
+            primary_org_id = org.id
+            org_bundle = (org, org_membership)
+            ws_bundle = (workspace, ws_membership)
+
+        issued = _issue_new_session(
             db,
+            user=user,
             organization_id=primary_org_id,
-            workspace_id=ws_bundle[0].id,
-            actor_user=user,
-            event_type="auth.register",
-            entity_type="workspace",
-            entity_id=ws_bundle[0].id,
-            summary="Registered new account and provisioned initial organization and workspace.",
-            tone="success",
-            metadata={"sessionId": str(issued.session.id)},
+            settings=settings,
             ip_address=ip_address,
+            user_agent=user_agent,
         )
 
-    db.commit()
+        if primary_org_id is not None and ws_bundle is not None:
+            record_audit_event(
+                db,
+                organization_id=primary_org_id,
+                workspace_id=ws_bundle[0].id,
+                actor_user=user,
+                event_type="auth.register",
+                entity_type="workspace",
+                entity_id=ws_bundle[0].id,
+                summary="Registered new account and provisioned initial organization and workspace.",
+                tone="success",
+                metadata={"sessionId": str(issued.session.id)},
+                ip_address=ip_address,
+            )
+
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        constraint_name = _get_constraint_name(exc)
+        if constraint_name == "uq_users_email_lower":
+            raise AppError(
+                status_code=status.HTTP_409_CONFLICT,
+                code="EMAIL_ALREADY_EXISTS",
+                message="An account with this email address already exists.",
+            ) from exc
+        if constraint_name == "uq_organizations_slug":
+            raise AppError(
+                status_code=status.HTTP_409_CONFLICT,
+                code="ORGANIZATION_SLUG_CONFLICT",
+                message="Organization slug collision; please retry registration.",
+            ) from exc
+        raise
+
     return user, org_bundle, ws_bundle, issued
 
 
@@ -368,11 +399,13 @@ def login_user(
     )
 
     org_rows, ws_rows = get_user_memberships_snapshot(db, user.id)
+    # Record auth.login strictly at organization scope (workspace_id=None) so unrelated
+    # workspace members do not observe another user's login metadata.
     for org, _ in org_rows:
         record_audit_event(
             db,
             organization_id=org.id,
-            workspace_id=ws_rows[0][0].id if ws_rows and ws_rows[0][0].organization_id == org.id else None,
+            workspace_id=None,
             actor_user=user,
             event_type="auth.login",
             entity_type="session",

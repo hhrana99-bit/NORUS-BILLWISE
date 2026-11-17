@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from typing import Literal
@@ -41,8 +42,9 @@ class RegisterRequest(ApiModel):
     @field_validator("password")
     @classmethod
     def validate_password(cls, value: str) -> str:
-        if not value.strip() or len(value) < 12:
-            raise ValueError("Password must be at least 12 non-whitespace characters.")
+        non_ws = re.sub(r"\s+", "", value)
+        if len(non_ws) < 12:
+            raise ValueError("Password must contain at least 12 non-whitespace characters.")
         return value
 
     @field_validator("full_name", "firm_type")

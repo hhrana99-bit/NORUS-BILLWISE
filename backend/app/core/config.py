@@ -44,8 +44,14 @@ class Settings(BaseSettings):
     db_echo: bool = False
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 14
+    invitation_expire_hours: int = 72
     jwt_issuer: str = "norus-billwise-api"
     jwt_audience: str = "norus-billwise-app"
+    rate_limit_enabled: bool = True
+    rate_limit_window_seconds: int = 60
+    login_rate_limit_max_attempts: int = 10
+    register_rate_limit_max_attempts: int = 10
+    refresh_rate_limit_max_attempts: int = 30
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -83,6 +89,19 @@ class Settings(BaseSettings):
 
         if self.refresh_token_expire_days < 1:
             raise ValueError("REFRESH_TOKEN_EXPIRE_DAYS must be at least 1.")
+
+        if self.invitation_expire_hours < 1:
+            raise ValueError("INVITATION_EXPIRE_HOURS must be at least 1.")
+
+        if self.rate_limit_window_seconds < 1:
+            raise ValueError("RATE_LIMIT_WINDOW_SECONDS must be at least 1.")
+
+        if (
+            self.login_rate_limit_max_attempts < 1
+            or self.register_rate_limit_max_attempts < 1
+            or self.refresh_rate_limit_max_attempts < 1
+        ):
+            raise ValueError("Rate limit max attempts must be at least 1.")
 
         for origin in self.cors_origins:
             if origin.strip() == "*":

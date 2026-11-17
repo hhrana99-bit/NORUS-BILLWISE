@@ -12,7 +12,9 @@ EXPECTED_TABLES = {
     "workspaces",
     "workspace_settings",
     "organization_memberships",
+    "organization_invitations",
     "workspace_memberships",
+    "auth_rate_limit_buckets",
     "suppliers",
     "documents",
     "invoices",
@@ -24,7 +26,8 @@ EXPECTED_TABLES = {
 }
 
 
-def test_all_15_tables_registered_on_metadata() -> None:
+def test_all_tables_registered_on_metadata() -> None:
+    assert len(EXPECTED_TABLES) == 17
     assert set(Base.metadata.tables.keys()) == EXPECTED_TABLES
 
 

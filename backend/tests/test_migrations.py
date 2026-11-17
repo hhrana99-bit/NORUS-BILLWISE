@@ -24,7 +24,9 @@ EXPECTED_TABLES = {
     "workspaces",
     "workspace_settings",
     "organization_memberships",
+    "organization_invitations",
     "workspace_memberships",
+    "auth_rate_limit_buckets",
     "suppliers",
     "documents",
     "invoices",
@@ -444,58 +446,57 @@ def test_alembic_upgrade_and_downgrade_on_postgresql(
         engine.dispose()
 
 
-def test_initial_migration_uses_op_f_for_check_constraints_matching_models() -> None:
-    migration_path = (
-        Path(__file__).resolve().parents[1]
-        / "alembic"
-        / "versions"
-        / "0001_initial_foundation.py"
-    )
-    tree = ast.parse(migration_path.read_text(encoding="utf-8"))
+def test_migrations_use_op_f_for_check_constraints_matching_models() -> None:
+    versions_dir = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+    migration_files = sorted(versions_dir.glob("*.py"))
+    assert migration_files, "No Alembic migration files found."
 
     migration_checks: dict[str, set[str]] = {}
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "create_table"
-            and node.args
-        ):
-            table_name = ast.literal_eval(node.args[0])
-            table_check_names: set[str] = set()
-            for arg in node.args[1:]:
-                if (
-                    isinstance(arg, ast.Call)
-                    and isinstance(arg.func, ast.Attribute)
-                    and arg.func.attr == "CheckConstraint"
-                ):
-                    name_kw = next(
-                        (kw for kw in arg.keywords if kw.arg == "name"),
-                        None,
-                    )
-                    assert name_kw is not None, (
-                        f"CheckConstraint on {table_name} must specify name=op.f(...)"
-                    )
-                    name_val = name_kw.value
-                    assert (
-                        isinstance(name_val, ast.Call)
-                        and isinstance(name_val.func, ast.Attribute)
-                        and isinstance(name_val.func.value, ast.Name)
-                        and name_val.func.value.id == "op"
-                        and name_val.func.attr == "f"
-                        and len(name_val.args) == 1
-                    ), (
-                        f"CheckConstraint on {table_name} must wrap name in op.f(...) "
-                        "to prevent MetaData naming_convention double-prefixing."
-                    )
-                    resolved_name = ast.literal_eval(name_val.args[0])
-                    assert isinstance(resolved_name, str)
-                    assert resolved_name.startswith(f"ck_{table_name}_")
-                    assert not resolved_name.startswith(f"ck_{table_name}_ck_")
-                    assert len(resolved_name) <= 63
-                    table_check_names.add(resolved_name)
-            if table_check_names:
-                migration_checks[table_name] = table_check_names
+    for migration_path in migration_files:
+        tree = ast.parse(migration_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "create_table"
+                and node.args
+            ):
+                table_name = ast.literal_eval(node.args[0])
+                table_check_names: set[str] = migration_checks.get(table_name, set())
+                for arg in node.args[1:]:
+                    if (
+                        isinstance(arg, ast.Call)
+                        and isinstance(arg.func, ast.Attribute)
+                        and arg.func.attr == "CheckConstraint"
+                    ):
+                        name_kw = next(
+                            (kw for kw in arg.keywords if kw.arg == "name"),
+                            None,
+                        )
+                        assert name_kw is not None, (
+                            f"CheckConstraint on {table_name} ({migration_path.name}) "
+                            "must specify name=op.f(...)"
+                        )
+                        name_val = name_kw.value
+                        assert (
+                            isinstance(name_val, ast.Call)
+                            and isinstance(name_val.func, ast.Attribute)
+                            and isinstance(name_val.func.value, ast.Name)
+                            and name_val.func.value.id == "op"
+                            and name_val.func.attr == "f"
+                            and len(name_val.args) == 1
+                        ), (
+                            f"CheckConstraint on {table_name} ({migration_path.name}) must wrap name "
+                            "in op.f(...) to prevent MetaData naming_convention double-prefixing."
+                        )
+                        resolved_name = ast.literal_eval(name_val.args[0])
+                        assert isinstance(resolved_name, str)
+                        assert resolved_name.startswith(f"ck_{table_name}_")
+                        assert not resolved_name.startswith(f"ck_{table_name}_ck_")
+                        assert len(resolved_name) <= 63
+                        table_check_names.add(resolved_name)
+                if table_check_names:
+                    migration_checks[table_name] = table_check_names
 
     expected_model_checks = {
         table_name: {

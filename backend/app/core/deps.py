@@ -47,6 +47,7 @@ class OrganizationContext:
 class WorkspaceContext:
     workspace: Workspace
     membership: WorkspaceMembership
+    organization_membership: OrganizationMembership
     principal: AuthPrincipal
 
 
@@ -60,17 +61,25 @@ def get_client_ip(request: Request) -> str | None:
     return request.client.host
 
 
-def require_csrf(
+def require_allowed_origin(
     request: Request,
     settings: Settings = Depends(get_app_settings),
 ) -> None:
-    """Validate Origin/Referer allowlist and double-submit CSRF cookie vs X-CSRF-Token header."""
+    """Enforce configured Origin/Referer allowlist (blocks Login/Register CSRF without CSRF token)."""
     if not is_allowed_request_origin(request, settings):
         raise AppError(
             status_code=status.HTTP_403_FORBIDDEN,
             code="CSRF_TOKEN_INVALID",
             message="Request origin is not permitted.",
         )
+
+
+def require_csrf(
+    request: Request,
+    settings: Settings = Depends(get_app_settings),
+) -> None:
+    """Validate Origin/Referer allowlist and double-submit CSRF cookie vs X-CSRF-Token header."""
+    require_allowed_origin(request, settings)
 
     cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
     header_token = request.headers.get(CSRF_HEADER_NAME)
@@ -146,7 +155,7 @@ def require_organization_role(
 def require_workspace_role(
     *allowed_roles: str,
 ) -> Callable[..., WorkspaceContext]:
-    """Dependency factory enforcing active WorkspaceMembership and explicit workspace role."""
+    """Dependency factory enforcing active org + workspace memberships and explicit workspace role."""
 
     def _dependency(
         workspace_id: uuid.UUID = Path(..., alias="workspaceId"),
@@ -154,18 +163,24 @@ def require_workspace_role(
         db: Session = Depends(get_db),
     ) -> WorkspaceContext:
         row = db.execute(
-            select(Workspace, WorkspaceMembership)
+            select(Workspace, WorkspaceMembership, OrganizationMembership)
             .join(
                 WorkspaceMembership,
                 WorkspaceMembership.workspace_id == Workspace.id,
             )
             .join(Organization, Organization.id == Workspace.organization_id)
+            .join(
+                OrganizationMembership,
+                (OrganizationMembership.organization_id == Organization.id)
+                & (OrganizationMembership.user_id == principal.user.id),
+            )
             .where(
                 Workspace.id == workspace_id,
                 Workspace.is_active.is_(True),
                 Organization.is_active.is_(True),
                 WorkspaceMembership.user_id == principal.user.id,
                 WorkspaceMembership.status == "ACTIVE",
+                OrganizationMembership.status == "ACTIVE",
             )
         ).first()
         if row is None:
@@ -175,8 +190,8 @@ def require_workspace_role(
                 message="Workspace not found.",
             )
 
-        workspace, membership = row[0], row[1]
-        if allowed_roles and membership.role not in allowed_roles:
+        workspace, ws_membership, org_membership = row[0], row[1], row[2]
+        if allowed_roles and ws_membership.role not in allowed_roles:
             raise AppError(
                 status_code=status.HTTP_403_FORBIDDEN,
                 code="FORBIDDEN_ROLE",
@@ -184,7 +199,8 @@ def require_workspace_role(
             )
         return WorkspaceContext(
             workspace=workspace,
-            membership=membership,
+            membership=ws_membership,
+            organization_membership=org_membership,
             principal=principal,
         )
 

@@ -174,11 +174,14 @@ def test_access_jwt_rejects_expired_tampered_and_wrong_claim_tokens() -> None:
 
 
 def test_origin_normalization_and_schema_human_review_guard() -> None:
+    from decimal import Decimal
+
     from pydantic import ValidationError
 
     from app.core.cookies import extract_normalized_origin
-    from app.schemas.auth import RegisterRequest
+    from app.schemas.auth import LoginRequest, RegisterRequest
     from app.schemas.tenancy import (
+        OrganizationInvitationCreateRequest,
         WorkspaceCreateRequest,
         WorkspaceSettingsUpdateRequest,
     )
@@ -189,11 +192,32 @@ def test_origin_normalization_and_schema_human_review_guard() -> None:
     )
     assert extract_normalized_origin("relative/path") is None
 
+    # All-whitespace AND padded-short passwords must be rejected (< 12 non-whitespace chars)
     with pytest.raises(ValidationError):
         RegisterRequest(
             email="valid@example.com",
             password="            ",
             full_name="Test User",
+        )
+    with pytest.raises(ValidationError, match="non-whitespace"):
+        RegisterRequest(
+            email="valid@example.com",
+            password="a           ",
+            full_name="Test User",
+        )
+
+    # extra="forbid" must reject unexpected keys
+    with pytest.raises(ValidationError):
+        LoginRequest(
+            email="valid@example.com",
+            password="StrongPractice!2026",
+            unexpectedField="hack",
+        )
+    with pytest.raises(ValidationError):
+        OrganizationInvitationCreateRequest(
+            email="invitee@example.com",
+            role="ORG_MEMBER",
+            extraRole="ORG_OWNER",
         )
 
     with pytest.raises(ValidationError, match="HUMAN_REVIEW_CANNOT_BE_DISABLED"):
@@ -206,4 +230,128 @@ def test_origin_normalization_and_schema_human_review_guard() -> None:
 
     with pytest.raises(ValidationError, match="HUMAN_REVIEW_CANNOT_BE_DISABLED"):
         WorkspaceSettingsUpdateRequest(require_human_review=False)
+
+    # Reject explicit null for non-nullable settings while preserving nullable GSTIN/PAN
+    with pytest.raises(ValidationError, match="cannot be null"):
+        WorkspaceSettingsUpdateRequest(enable_duplicate_warnings=None)
+    with pytest.raises(ValidationError, match="cannot be null"):
+        WorkspaceSettingsUpdateRequest(legal_entity_name=None)
+    with pytest.raises(ValidationError, match="cannot be null"):
+        WorkspaceSettingsUpdateRequest(rounding_tolerance=None)
+    cleared_tax_ids = WorkspaceSettingsUpdateRequest(company_gstin=None, company_pan=None)
+    assert cleared_tax_ids.company_gstin is None
+    assert cleared_tax_ids.company_pan is None
+
+    # Validate GSTIN, PAN, defaultCurrency, and 2-decimal roundingTolerance precision
+    with pytest.raises(ValidationError, match="GSTIN"):
+        WorkspaceSettingsUpdateRequest(company_gstin="INVALIDGSTIN123")
+    with pytest.raises(ValidationError, match="PAN"):
+        WorkspaceSettingsUpdateRequest(company_pan="BADPAN1234")
+    with pytest.raises(ValidationError, match="currency"):
+        WorkspaceSettingsUpdateRequest(default_currency="123")
+    with pytest.raises(ValidationError):
+        WorkspaceSettingsUpdateRequest(rounding_tolerance=Decimal("1.234"))
+
+    valid_tax_ids = WorkspaceSettingsUpdateRequest(
+        company_gstin="27aabcb1234m1z5",
+        company_pan="aabcb1234m",
+        default_currency="inr",
+        rounding_tolerance=Decimal("1.25"),
+    )
+    assert valid_tax_ids.company_gstin == "27AABCB1234M1Z5"
+    assert valid_tax_ids.company_pan == "AABCB1234M"
+    assert valid_tax_ids.default_currency == "INR"
+    assert valid_tax_ids.rounding_tolerance == Decimal("1.25")
+
+
+def test_is_allowed_request_origin_enforces_staging_and_production_headers() -> None:
+    from starlette.requests import Request
+
+    from app.core.cookies import is_allowed_request_origin
+
+    def _make_request(headers: list[tuple[bytes, bytes]]) -> Request:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/v1/auth/login",
+            "headers": headers,
+        }
+        return Request(scope)
+
+    dev_settings = _security_settings()
+    staging_settings = Settings(
+        _env_file=None,
+        app_env="staging",
+        database_url="postgresql+psycopg://postgres:test_only@localhost:5432/norus_billwise_test",
+        jwt_secret_key="staging-test-only-signing-secret-with-32-chars",
+        cookie_secure=True,
+        cors_origins=["https://app.norus.example"],
+    )
+
+    # Disallowed Origin always rejected even if Referer matches
+    bad_origin_req = _make_request(
+        [
+            (b"origin", b"https://evil.example"),
+            (b"referer", b"https://app.norus.example/login"),
+        ]
+    )
+    assert is_allowed_request_origin(bad_origin_req, dev_settings) is False
+    assert is_allowed_request_origin(bad_origin_req, staging_settings) is False
+
+    # Valid Referer fallback accepted when Origin omitted
+    good_referer_req = _make_request(
+        [(b"referer", b"https://app.norus.example/login?next=/workspaces")]
+    )
+    assert is_allowed_request_origin(good_referer_req, staging_settings) is True
+
+    # Missing Origin & Referer allowed in test/dev, rejected in staging/production
+    no_headers_req = _make_request([])
+    assert is_allowed_request_origin(no_headers_req, dev_settings) is True
+    assert is_allowed_request_origin(no_headers_req, staging_settings) is False
+
+
+def test_audit_service_truncates_long_ip_addresses() -> None:
+    from app.models.review import AuditEvent
+    from app.services.audit_service import record_audit_event
+
+    added: list[AuditEvent] = []
+
+    class _MockSession:
+        def add(self, obj: AuditEvent) -> None:
+            added.append(obj)
+
+    record_audit_event(
+        _MockSession(),  # type: ignore[arg-type]
+        organization_id=uuid.uuid4(),
+        actor_user=None,
+        event_type="auth.login",
+        entity_type="session",
+        entity_id=uuid.uuid4(),
+        summary="Recorded event",
+        ip_address="2001:0db8:85a3:0000:0000:8a2e:0370:7334:" + ("x" * 64),
+    )
+    assert len(added) == 1
+    assert added[0].ip_address is not None
+    assert len(added[0].ip_address) == 64
+
+
+def test_unhandled_exception_returns_sanitized_500_internal_error_envelope() -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    app = create_app(_security_settings())
+
+    @app.get("/api/v1/_test-unhandled-error")
+    def _boom() -> None:
+        raise RuntimeError("sensitive internal db connection string secret")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.get("/api/v1/_test-unhandled-error")
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["error"]["code"] == "INTERNAL_ERROR"
+    assert body["error"]["requestId"]
+    assert "sensitive internal db connection string secret" not in resp.text
+
 

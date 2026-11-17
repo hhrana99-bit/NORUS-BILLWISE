@@ -2,7 +2,7 @@
 
 ## Immediate Verification Prerequisite (Run Outside Container Runtime)
 
-Before starting Task 002.4 feature endpoints, push/sync Task 002.3 Batch 2 to GitHub `main` (or execute locally on **Python 3.12+ + PostgreSQL 16+**) to verify the Batch 2 `pytest` and CI suite:
+Before starting Task 002.4 feature endpoints, push/sync Task 002.3 Batch 2 + Batch 2.1 to GitHub `main` (or execute locally on **Python 3.12+ + PostgreSQL 16+**) to verify Alembic `0001`–`0002` migrations and the full `pytest` suite:
 
 ```bash
 cd backend

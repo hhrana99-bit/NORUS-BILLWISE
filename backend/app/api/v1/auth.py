@@ -15,6 +15,7 @@ from app.core.deps import (
     get_app_settings,
     get_client_ip,
     get_current_principal,
+    require_allowed_origin,
     require_csrf,
 )
 from app.db.session import get_db
@@ -37,6 +38,7 @@ from app.services.auth_service import (
     refresh_user_session,
     register_user,
 )
+from app.services.rate_limit_service import enforce_auth_rate_limit
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -46,7 +48,8 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
     response_model=RegisterResponse,
     response_model_by_alias=True,
     status_code=status.HTTP_201_CREATED,
-    summary="Register a new user account and issue session cookies (CSRF-exempt)",
+    dependencies=[Depends(require_allowed_origin)],
+    summary="Register a new user account and issue session cookies (Origin-validated, rate-limited)",
 )
 def register(
     payload: RegisterRequest,
@@ -55,6 +58,13 @@ def register(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ) -> RegisterResponse:
+    client_ip = get_client_ip(request)
+    enforce_auth_rate_limit(
+        request,
+        settings,
+        action="register",
+        ip_address=client_ip,
+    )
     user, org_bundle, ws_bundle, issued = register_user(
         db,
         email=payload.email,
@@ -63,7 +73,7 @@ def register(
         organization_name=payload.organization_name,
         firm_type=payload.firm_type,
         settings=settings,
-        ip_address=get_client_ip(request),
+        ip_address=client_ip,
         user_agent=request.headers.get("user-agent"),
     )
     set_auth_cookies(
@@ -114,7 +124,8 @@ def register(
     "/login",
     response_model=LoginResponse,
     response_model_by_alias=True,
-    summary="Authenticate via Argon2id and issue HttpOnly session cookies (CSRF-exempt)",
+    dependencies=[Depends(require_allowed_origin)],
+    summary="Authenticate via Argon2id and issue HttpOnly cookies (Origin-validated, rate-limited)",
 )
 def login(
     payload: LoginRequest,
@@ -123,12 +134,20 @@ def login(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ) -> LoginResponse:
+    client_ip = get_client_ip(request)
+    enforce_auth_rate_limit(
+        request,
+        settings,
+        action="login",
+        ip_address=client_ip,
+        account_identifier=payload.email,
+    )
     user, ws_rows, issued = login_user(
         db,
         email=payload.email,
         password=payload.password,
         settings=settings,
-        ip_address=get_client_ip(request),
+        ip_address=client_ip,
         user_agent=request.headers.get("user-agent"),
     )
     set_auth_cookies(
@@ -164,7 +183,7 @@ def login(
     response_model=RefreshResponse,
     response_model_by_alias=True,
     dependencies=[Depends(require_csrf)],
-    summary="Rotate refresh cookie with token-family reuse detection",
+    summary="Rotate refresh cookie with token-family reuse detection and rate limiting",
 )
 def refresh(
     request: Request,
@@ -172,11 +191,18 @@ def refresh(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_app_settings),
 ) -> RefreshResponse:
+    client_ip = get_client_ip(request)
+    enforce_auth_rate_limit(
+        request,
+        settings,
+        action="refresh",
+        ip_address=client_ip,
+    )
     issued = refresh_user_session(
         db,
         raw_refresh_token=request.cookies.get(REFRESH_COOKIE_NAME),
         settings=settings,
-        ip_address=get_client_ip(request),
+        ip_address=client_ip,
         user_agent=request.headers.get("user-agent"),
     )
     set_auth_cookies(

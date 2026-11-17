@@ -1,16 +1,44 @@
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import Field, field_serializer, field_validator, model_validator
+from pydantic.alias_generators import to_camel
 
 from app.schemas.auth import OrgRole, WorkspaceRole, normalize_and_validate_email
 from app.schemas.base import ApiModel
 
 MembershipStatus = Literal["ACTIVE", "SUSPENDED"]
+InvitedOrgRole = Literal["ORG_ADMIN", "ORG_MEMBER"]
+
+_GSTIN_REGEX = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
+_PAN_REGEX = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
+
+
+def normalize_and_validate_gstin(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip().upper()
+    if not cleaned:
+        return None
+    if not _GSTIN_REGEX.fullmatch(cleaned):
+        raise ValueError("companyGstin must be a valid 15-character Indian GSTIN.")
+    return cleaned
+
+
+def normalize_and_validate_pan(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip().upper()
+    if not cleaned:
+        return None
+    if not _PAN_REGEX.fullmatch(cleaned):
+        raise ValueError("companyPan must be a valid 10-character Indian PAN.")
+    return cleaned
 
 
 class OrganizationCreateRequest(ApiModel):
@@ -47,6 +75,66 @@ class OrganizationListResponse(ApiModel):
     items: list[OrganizationDto]
 
 
+class OrganizationMembershipDto(ApiModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    user_id: uuid.UUID
+    email: str
+    full_name: str
+    role: OrgRole
+    status: MembershipStatus
+    created_at: datetime
+    updated_at: datetime
+
+
+class OrganizationMembershipListResponse(ApiModel):
+    items: list[OrganizationMembershipDto]
+
+
+class OrganizationMembershipUpdateRequest(ApiModel):
+    role: OrgRole | None = None
+    status: MembershipStatus | None = None
+
+    @model_validator(mode="after")
+    def require_at_least_one_field(self) -> OrganizationMembershipUpdateRequest:
+        if self.role is None and self.status is None:
+            raise ValueError("At least one of 'role' or 'status' must be provided.")
+        return self
+
+
+class OrganizationInvitationCreateRequest(ApiModel):
+    email: str = Field(..., min_length=5, max_length=255)
+    role: InvitedOrgRole = "ORG_MEMBER"
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return normalize_and_validate_email(value)
+
+
+class OrganizationInvitationDto(ApiModel):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    invited_email: str
+    role: InvitedOrgRole
+    status: Literal["PENDING", "ACCEPTED", "REVOKED", "EXPIRED"]
+    expires_at: datetime
+    created_at: datetime
+    invite_token: str | None = None
+
+
+class OrganizationInvitationAcceptRequest(ApiModel):
+    token: str = Field(..., min_length=16, max_length=255)
+
+    @field_validator("token")
+    @classmethod
+    def validate_token(cls, value: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) < 16:
+            raise ValueError("Invalid invitation token.")
+        return cleaned
+
+
 class WorkspaceCreateRequest(ApiModel):
     name: str = Field(..., min_length=1, max_length=200)
     workspace_code: str = Field(..., min_length=2, max_length=50)
@@ -71,6 +159,16 @@ class WorkspaceCreateRequest(ApiModel):
         if not cleaned or any(ch.isspace() for ch in cleaned):
             raise ValueError("workspaceCode must not be blank or contain spaces.")
         return cleaned
+
+    @field_validator("company_gstin")
+    @classmethod
+    def validate_gstin(cls, value: str | None) -> str | None:
+        return normalize_and_validate_gstin(value)
+
+    @field_validator("company_pan")
+    @classmethod
+    def validate_pan(cls, value: str | None) -> str | None:
+        return normalize_and_validate_pan(value)
 
     @field_validator("require_human_review")
     @classmethod
@@ -141,7 +239,13 @@ class WorkspaceSettingsUpdateRequest(ApiModel):
     require_human_review: bool | None = None
     enable_duplicate_warnings: bool | None = None
     auto_flag_tax_mismatch: bool | None = None
-    rounding_tolerance: Decimal | None = Field(default=None, ge=Decimal("0.00"), le=Decimal("10.00"))
+    rounding_tolerance: Decimal | None = Field(
+        default=None,
+        ge=Decimal("0.00"),
+        le=Decimal("10.00"),
+        max_digits=4,
+        decimal_places=2,
+    )
     default_currency: str | None = Field(default=None, min_length=3, max_length=3)
     financial_year: str | None = Field(default=None, min_length=1, max_length=32)
     date_format: str | None = Field(default=None, min_length=1, max_length=20)
@@ -150,12 +254,44 @@ class WorkspaceSettingsUpdateRequest(ApiModel):
     notify_daily_digest: bool | None = None
     notify_duplicate_alerts: bool | None = None
 
+    @model_validator(mode="after")
+    def reject_null_for_non_nullable_fields(self) -> WorkspaceSettingsUpdateRequest:
+        non_nullable = (
+            "legal_entity_name",
+            "registered_address",
+            "require_human_review",
+            "enable_duplicate_warnings",
+            "auto_flag_tax_mismatch",
+            "rounding_tolerance",
+            "default_currency",
+            "financial_year",
+            "date_format",
+            "tax_regime",
+            "notify_flagged_invoices",
+            "notify_daily_digest",
+            "notify_duplicate_alerts",
+        )
+        for field_name in non_nullable:
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{to_camel(field_name)} cannot be null.")
+        return self
+
     @field_validator("require_human_review")
     @classmethod
     def enforce_human_review_locked(cls, value: bool | None) -> bool | None:
         if value is False:
             raise ValueError("HUMAN_REVIEW_CANNOT_BE_DISABLED")
         return value
+
+    @field_validator("company_gstin")
+    @classmethod
+    def validate_gstin(cls, value: str | None) -> str | None:
+        return normalize_and_validate_gstin(value)
+
+    @field_validator("company_pan")
+    @classmethod
+    def validate_pan(cls, value: str | None) -> str | None:
+        return normalize_and_validate_pan(value)
 
     @field_validator("legal_entity_name", "financial_year", "date_format", "tax_regime")
     @classmethod
@@ -173,7 +309,7 @@ class WorkspaceSettingsUpdateRequest(ApiModel):
         if value is None:
             return None
         cleaned = value.strip().upper()
-        if len(cleaned) != 3:
+        if len(cleaned) != 3 or not cleaned.isalpha():
             raise ValueError("defaultCurrency must be a 3-letter ISO currency code.")
         return cleaned
 

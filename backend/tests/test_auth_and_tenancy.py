@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import threading
 import uuid
 from collections.abc import Callable, Generator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from datetime import timedelta
 from urllib.parse import urlparse
@@ -21,10 +23,14 @@ from app.core.security import create_access_token, hash_refresh_token
 from app.main import create_app
 from app.models.review import AuditEvent
 from app.models.tenancy import (
+    Organization,
+    OrganizationInvitation,
     OrganizationMembership,
     User,
     UserSession,
+    Workspace,
     WorkspaceSettings,
+    utc_now,
 )
 from tests.conftest import TEST_JWT_SECRET
 from tests.test_migrations import (
@@ -132,17 +138,32 @@ def db_session(pg_test_url: str) -> Generator[Session, None, None]:
 @pytest.fixture
 def make_client(
     pg_settings: Settings,
+    pg_test_url: str,
 ) -> Generator[Callable[..., TestClient], None, None]:
+    # Isolate PostgreSQL rate-limit buckets between tests while allowing multiple
+    # TestClient instances within the same test to share rate-limit state.
+    clean_engine = create_engine(pg_test_url, pool_pre_ping=True)
+    with clean_engine.begin() as conn:
+        conn.execute(text("DELETE FROM auth_rate_limit_buckets"))
+    clean_engine.dispose()
+
     stack = ExitStack()
 
     def _factory(
         *,
         custom_settings: Settings | None = None,
         base_url: str = "http://testserver",
+        raise_server_exceptions: bool = True,
     ) -> TestClient:
         get_settings.cache_clear()
         app = create_app(custom_settings or pg_settings)
-        client = stack.enter_context(TestClient(app, base_url=base_url))
+        client = stack.enter_context(
+            TestClient(
+                app,
+                base_url=base_url,
+                raise_server_exceptions=raise_server_exceptions,
+            )
+        )
         return client
 
     yield _factory
@@ -182,6 +203,32 @@ def _register_user(
     resp = client.post("/api/v1/auth/register", json=payload)
     assert resp.status_code == 201, resp.text
     return resp.json()
+
+
+def _onboard_user_to_org(
+    org_admin_client: TestClient,
+    *,
+    org_id: str,
+    member_client: TestClient,
+    email: str,
+    role: str = "ORG_MEMBER",
+) -> str:
+    invite_resp = org_admin_client.post(
+        f"/api/v1/organizations/{org_id}/invitations",
+        headers=_csrf_headers(org_admin_client),
+        json={"email": email, "role": role},
+    )
+    assert invite_resp.status_code == 201, invite_resp.text
+    raw_token = invite_resp.json()["inviteToken"]
+    assert raw_token
+
+    accept_resp = member_client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=_csrf_headers(member_client),
+        json={"token": raw_token},
+    )
+    assert accept_resp.status_code == 200, accept_resp.text
+    return raw_token
 
 
 def test_registration_duplicate_email_cookies_and_audit_trail(
@@ -752,7 +799,7 @@ def test_workspace_rbac_roles_and_require_human_review_immutable(
     ws_id = admin_reg["workspace"]["workspaceId"]
     org_id = admin_reg["organization"]["id"]
 
-    # Register Reviewer, Uploader, and Viewer accounts
+    # Register Reviewer, Uploader, and Viewer accounts and onboard them into org_id
     reviewer_client = make_client()
     reviewer_email = _register_user(reviewer_client, prefix="rbac_rev")["user"]["email"]
 
@@ -763,6 +810,27 @@ def test_workspace_rbac_roles_and_require_human_review_immutable(
 
     viewer_client = make_client()
     viewer_email = _register_user(viewer_client, prefix="rbac_view")["user"]["email"]
+
+    # Adding a user to a workspace before org onboarding must fail uniformly with 404
+    pre_onboard_add = admin_client.post(
+        f"/api/v1/workspaces/{ws_id}/memberships",
+        headers=_csrf_headers(admin_client),
+        json={"email": reviewer_email, "role": "REVIEWER"},
+    )
+    assert pre_onboard_add.status_code == 404
+    assert pre_onboard_add.json()["error"]["code"] == "ORGANIZATION_MEMBER_NOT_FOUND"
+
+    for member_client, member_email in [
+        (reviewer_client, reviewer_email),
+        (uploader_client, uploader_email),
+        (viewer_client, viewer_email),
+    ]:
+        _onboard_user_to_org(
+            admin_client,
+            org_id=org_id,
+            member_client=member_client,
+            email=member_email,
+        )
 
     for email, role in [
         (reviewer_email, "REVIEWER"),
@@ -899,10 +967,16 @@ def test_last_admin_protection_and_session_revocation_on_membership_mutation(
     assert delete_sole.status_code == 409
     assert delete_sole.json()["error"]["code"] == "CANNOT_DOWNGRADE_LAST_ADMIN"
 
-    # Add User 2 as Reviewer, verify duplicate membership returns 409
+    # Add User 2 via invitation onboarding, grant Reviewer, verify duplicate returns 409
     user2_client = make_client()
     user2_reg = _register_user(user2_client, prefix="member_two")
     user2_email = user2_reg["user"]["email"]
+    _onboard_user_to_org(
+        admin_client,
+        org_id=admin_reg["organization"]["id"],
+        member_client=user2_client,
+        email=user2_email,
+    )
 
     added_u2 = admin_client.post(
         f"/api/v1/workspaces/{ws_id}/memberships",
@@ -993,3 +1067,604 @@ def test_last_admin_protection_and_session_revocation_on_membership_mutation(
     assert "membership.updated" in events
     assert "membership.suspended" in events
     assert "membership.removed" in events
+
+
+# ---------------------------------------------------------------------------
+# Batch 2.1 security & reliability regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_integration_postgres_url_validation_guard() -> None:
+    assert (
+        _validate_integration_postgres_url(
+            "postgresql+psycopg://postgres:test@localhost:5432/norus_billwise_test",
+            require_postgres=True,
+        )
+        == "postgresql+psycopg://postgres:test@localhost:5432/norus_billwise_test"
+    )
+    assert _validate_integration_postgres_url("", require_postgres=False) is None
+    with pytest.raises(MigrationTestSafetyError):
+        _validate_integration_postgres_url("", require_postgres=True)
+    with pytest.raises(MigrationTestSafetyError):
+        _validate_integration_postgres_url(
+            "sqlite:///./local.db", require_postgres=True
+        )
+    with pytest.raises(MigrationTestSafetyError):
+        _validate_integration_postgres_url(
+            "postgresql+psycopg://u:p@db.prod.internal:5432/norus_billwise_test",
+            require_postgres=True,
+        )
+    with pytest.raises(MigrationTestSafetyError):
+        _validate_integration_postgres_url(
+            "postgresql+psycopg://u:p@localhost:5432/norus_billwise_prod",
+            require_postgres=True,
+        )
+
+
+def test_anti_enumeration_invitation_lifecycle_and_org_suspension(
+    make_client: Callable[..., TestClient],
+    db_session: Session,
+) -> None:
+    owner_client = make_client()
+    owner_reg = _register_user(
+        owner_client, prefix="org_sec_owner", org_name="Secure Onboarding Practice"
+    )
+    org_id = owner_reg["organization"]["id"]
+    ws_id = owner_reg["workspace"]["workspaceId"]
+
+    rival_client = make_client()
+    rival_reg = _register_user(
+        rival_client, prefix="rival_user", org_name="Rival Practice Ltd"
+    )
+    rival_email = rival_reg["user"]["email"]
+
+    # Non-org member vs non-existent user MUST return identical error payload (zero enumeration)
+    rival_add = owner_client.post(
+        f"/api/v1/workspaces/{ws_id}/memberships",
+        headers=_csrf_headers(owner_client),
+        json={"email": rival_email, "role": "REVIEWER"},
+    )
+    ghost_add = owner_client.post(
+        f"/api/v1/workspaces/{ws_id}/memberships",
+        headers=_csrf_headers(owner_client),
+        json={"email": f"nobody-{uuid.uuid4().hex[:8]}@example.invalid", "role": "REVIEWER"},
+    )
+    assert rival_add.status_code == 404
+    assert ghost_add.status_code == 404
+    assert rival_add.json()["error"]["code"] == "ORGANIZATION_MEMBER_NOT_FOUND"
+    assert ghost_add.json()["error"]["code"] == "ORGANIZATION_MEMBER_NOT_FOUND"
+    assert rival_add.json()["error"]["message"] == ghost_add.json()["error"]["message"]
+
+    # Issue invitation: inviteToken is only returned on creation, omitted from list
+    inv_create = owner_client.post(
+        f"/api/v1/organizations/{org_id}/invitations",
+        headers=_csrf_headers(owner_client),
+        json={"email": rival_email, "role": "ORG_MEMBER"},
+    )
+    assert inv_create.status_code == 201
+    inv_id = inv_create.json()["id"]
+    inv_token = inv_create.json()["inviteToken"]
+    assert inv_token
+
+    listed_invs = owner_client.get(f"/api/v1/organizations/{org_id}/invitations").json()
+    assert any(item["id"] == inv_id and item.get("inviteToken") is None for item in listed_invs)
+
+    # Wrong user cannot accept another user's invitation token (403 INVITATION_EMAIL_MISMATCH)
+    other_client = make_client()
+    _register_user(other_client, prefix="wrong_acceptor")
+    wrong_accept = other_client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=_csrf_headers(other_client),
+        json={"token": inv_token},
+    )
+    assert wrong_accept.status_code == 403
+    assert wrong_accept.json()["error"]["code"] == "INVITATION_EMAIL_MISMATCH"
+
+    # Correct user accepts invitation -> can now be added to workspace
+    ok_accept = rival_client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=_csrf_headers(rival_client),
+        json={"token": inv_token},
+    )
+    assert ok_accept.status_code == 200
+    assert ok_accept.json()["role"] == "ORG_MEMBER"
+
+    # Re-using accepted token fails with 409 INVITATION_EXPIRED_OR_USED
+    reuse_accept = rival_client.post(
+        "/api/v1/organizations/invitations/accept",
+        headers=_csrf_headers(rival_client),
+        json={"token": inv_token},
+    )
+    assert reuse_accept.status_code == 409
+    assert reuse_accept.json()["error"]["code"] == "INVITATION_EXPIRED_OR_USED"
+
+    # Revoked or expired invitations fail with 409
+    rev_inv = owner_client.post(
+        f"/api/v1/organizations/{org_id}/invitations",
+        headers=_csrf_headers(owner_client),
+        json={"email": "pending.revoke@example.invalid", "role": "ORG_MEMBER"},
+    ).json()
+    assert (
+        owner_client.delete(
+            f"/api/v1/organizations/{org_id}/invitations/{rev_inv['id']}",
+            headers=_csrf_headers(owner_client),
+        ).status_code
+        == 204
+    )
+    assert (
+        rival_client.post(
+            "/api/v1/organizations/invitations/accept",
+            headers=_csrf_headers(rival_client),
+            json={"token": rev_inv["inviteToken"]},
+        ).status_code
+        == 409
+    )
+
+    exp_inv = owner_client.post(
+        f"/api/v1/organizations/{org_id}/invitations",
+        headers=_csrf_headers(owner_client),
+        json={"email": rival_email, "role": "ORG_MEMBER"},
+    ).json()
+    exp_row = db_session.get(OrganizationInvitation, uuid.UUID(exp_inv["id"]))
+    assert exp_row is not None
+    exp_row.expires_at = utc_now() - timedelta(minutes=5)
+    db_session.commit()
+    assert (
+        rival_client.post(
+            "/api/v1/organizations/invitations/accept",
+            headers=_csrf_headers(rival_client),
+            json={"token": exp_inv["inviteToken"]},
+        ).status_code
+        == 409
+    )
+
+    # Now add onboarded rival_email to workspace
+    ws_add = owner_client.post(
+        f"/api/v1/workspaces/{ws_id}/memberships",
+        headers=_csrf_headers(owner_client),
+        json={"email": rival_email, "role": "REVIEWER"},
+    )
+    assert ws_add.status_code == 201
+    assert rival_client.get(f"/api/v1/workspaces/{ws_id}").status_code == 200
+
+    # List org memberships & protect sole ORG_OWNER
+    org_members = owner_client.get(
+        f"/api/v1/organizations/{org_id}/memberships"
+    ).json()["items"]
+    owner_mem = next(m for m in org_members if m["role"] == "ORG_OWNER")
+    rival_mem = next(m for m in org_members if m["email"] == rival_email)
+
+    sole_owner_downgrade = owner_client.patch(
+        f"/api/v1/organizations/{org_id}/memberships/{owner_mem['id']}",
+        headers=_csrf_headers(owner_client),
+        json={"role": "ORG_ADMIN"},
+    )
+    assert sole_owner_downgrade.status_code == 409
+    assert sole_owner_downgrade.json()["error"]["code"] == "CANNOT_DOWNGRADE_LAST_ORG_OWNER"
+
+    # Suspending rival's OrganizationMembership revokes session AND blocks workspace access even after re-login
+    suspend_org_mem = owner_client.patch(
+        f"/api/v1/organizations/{org_id}/memberships/{rival_mem['id']}",
+        headers=_csrf_headers(owner_client),
+        json={"status": "SUSPENDED"},
+    )
+    assert suspend_org_mem.status_code == 200
+    assert rival_client.get("/api/v1/auth/me").status_code == 401
+
+    assert (
+        rival_client.post(
+            "/api/v1/auth/login",
+            json={"email": rival_email, "password": "StrongPractice!2026"},
+        ).status_code
+        == 200
+    )
+    assert rival_client.get(f"/api/v1/workspaces/{ws_id}").status_code == 404
+    ws_ids_for_rival = [
+        w["id"] for w in rival_client.get("/api/v1/workspaces").json()["items"]
+    ]
+    assert ws_id not in ws_ids_for_rival
+    me_ws_ids = [
+        w["workspaceId"] for w in rival_client.get("/api/v1/auth/me").json()["workspaces"]
+    ]
+    assert ws_id not in me_ws_ids
+
+    # Suspended org member also blocked from workspace membership addition uniformly (404)
+    suspended_readd = owner_client.post(
+        f"/api/v1/workspaces/{ws_id}/memberships",
+        headers=_csrf_headers(owner_client),
+        json={"email": rival_email, "role": "VIEWER"},
+    )
+    assert suspended_readd.status_code == 404
+    assert suspended_readd.json()["error"]["code"] == "ORGANIZATION_MEMBER_NOT_FOUND"
+
+    # Removing OrganizationMembership deletes cascading workspace memberships
+    assert (
+        owner_client.delete(
+            f"/api/v1/organizations/{org_id}/memberships/{rival_mem['id']}",
+            headers=_csrf_headers(owner_client),
+        ).status_code
+        == 204
+    )
+    assert rival_client.get("/api/v1/auth/me").status_code == 401
+
+
+def test_inactive_org_and_workspace_return_404_and_hidden_from_me(
+    make_client: Callable[..., TestClient],
+    db_session: Session,
+) -> None:
+    client = make_client()
+    reg = _register_user(client, prefix="deact", org_name="Deactivation Firm")
+    org_id = reg["organization"]["id"]
+    ws_id = reg["workspace"]["workspaceId"]
+
+    ws_row = db_session.get(Workspace, uuid.UUID(ws_id))
+    assert ws_row is not None
+    ws_row.is_active = False
+    db_session.commit()
+
+    assert client.get(f"/api/v1/workspaces/{ws_id}").status_code == 404
+    assert client.get("/api/v1/auth/me").json()["workspaces"] == []
+
+    org_row = db_session.get(Organization, uuid.UUID(org_id))
+    assert org_row is not None
+    org_row.is_active = False
+    db_session.commit()
+
+    assert client.get("/api/v1/auth/me").json()["organizations"] == []
+    assert client.get("/api/v1/organizations").json()["items"] == []
+
+
+def test_login_and_register_origin_enforcement_including_staging_production(
+    make_client: Callable[..., TestClient],
+    pg_test_url: str,
+) -> None:
+    dev_client = make_client()
+    reg = _register_user(dev_client, prefix="origin_chk", org_name="Origin Firm")
+    email = reg["user"]["email"]
+
+    # Disallowed Origin on /register & /login rejected with 403 CSRF_TOKEN_INVALID
+    bad_reg = dev_client.post(
+        "/api/v1/auth/register",
+        headers={"Origin": "https://attacker.example"},
+        json={
+            "email": "attacker.reg@example.invalid",
+            "password": "StrongPractice!2026",
+            "fullName": "Attacker",
+        },
+    )
+    assert bad_reg.status_code == 403
+    assert bad_reg.json()["error"]["code"] == "CSRF_TOKEN_INVALID"
+
+    bad_login = dev_client.post(
+        "/api/v1/auth/login",
+        headers={"Origin": "https://attacker.example"},
+        json={"email": email, "password": "StrongPractice!2026"},
+    )
+    assert bad_login.status_code == 403
+    assert bad_login.json()["error"]["code"] == "CSRF_TOKEN_INVALID"
+
+    # Allowed Referer without Origin succeeds without needing pre-existing CSRF cookie
+    referer_login = make_client().post(
+        "/api/v1/auth/login",
+        headers={"Referer": "http://localhost:3000/login?next=/"},
+        json={"email": email, "password": "StrongPractice!2026"},
+    )
+    assert referer_login.status_code == 200
+
+    # Staging/production requires explicit Origin or Referer on login & register
+    staging_settings = Settings(
+        _env_file=None,
+        app_env="staging",
+        database_url=pg_test_url,
+        jwt_secret_key="staging-test-only-signing-secret-with-32-chars",
+        cookie_secure=True,
+        cors_origins=["https://app.norus.example"],
+        log_level="WARNING",
+    )
+    staging_client = make_client(
+        custom_settings=staging_settings,
+        base_url="https://app.norus.example",
+    )
+    missing_origin_login = staging_client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": "StrongPractice!2026"},
+    )
+    assert missing_origin_login.status_code == 403
+    assert missing_origin_login.json()["error"]["code"] == "CSRF_TOKEN_INVALID"
+
+    missing_origin_register = staging_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "missing.origin@example.invalid",
+            "password": "StrongPractice!2026",
+            "fullName": "No Origin",
+        },
+    )
+    assert missing_origin_register.status_code == 403
+    assert missing_origin_register.json()["error"]["code"] == "CSRF_TOKEN_INVALID"
+
+
+def test_postgresql_rate_limiting_across_login_register_and_refresh(
+    make_client: Callable[..., TestClient],
+    pg_test_url: str,
+) -> None:
+    rl_settings = Settings(
+        _env_file=None,
+        app_env="test",
+        database_url=pg_test_url,
+        jwt_secret_key=TEST_JWT_SECRET,
+        cookie_secure=False,
+        cors_origins=["http://localhost:3000"],
+        log_level="WARNING",
+        rate_limit_enabled=True,
+        rate_limit_window_seconds=60,
+        register_rate_limit_max_attempts=2,
+        login_rate_limit_max_attempts=3,
+        refresh_rate_limit_max_attempts=2,
+    )
+
+    c1 = make_client(custom_settings=rl_settings)
+    c2 = make_client(custom_settings=rl_settings)
+
+    # /auth/register shares PostgreSQL rate-limit bucket across separate client instances
+    reg1 = c1.post(
+        "/api/v1/auth/register",
+        json={
+            "email": f"rl1.{uuid.uuid4().hex[:6]}@example.invalid",
+            "password": "StrongPractice!2026",
+            "fullName": "Rate Limit One",
+        },
+    )
+    assert reg1.status_code == 201
+    reg2 = c2.post(
+        "/api/v1/auth/register",
+        json={
+            "email": f"rl2.{uuid.uuid4().hex[:6]}@example.invalid",
+            "password": "StrongPractice!2026",
+            "fullName": "Rate Limit Two",
+        },
+    )
+    assert reg2.status_code == 201
+    reg3 = c1.post(
+        "/api/v1/auth/register",
+        json={
+            "email": f"rl3.{uuid.uuid4().hex[:6]}@example.invalid",
+            "password": "StrongPractice!2026",
+            "fullName": "Rate Limit Three",
+        },
+    )
+    assert reg3.status_code == 429
+    assert reg3.json()["error"]["code"] == "RATE_LIMITED"
+    assert int(reg3.headers["Retry-After"]) >= 1
+
+    # /auth/refresh rate-limited after 2 calls
+    assert (
+        c1.post("/api/v1/auth/refresh", headers=_csrf_headers(c1)).status_code == 200
+    )
+    assert (
+        c1.post("/api/v1/auth/refresh", headers=_csrf_headers(c1)).status_code == 200
+    )
+    refresh_blocked = c1.post("/api/v1/auth/refresh", headers=_csrf_headers(c1))
+    assert refresh_blocked.status_code == 429
+    assert refresh_blocked.json()["error"]["code"] == "RATE_LIMITED"
+    assert int(refresh_blocked.headers["Retry-After"]) >= 1
+
+    # /auth/login counts failed 401 attempts even across separate clients
+    for _ in range(3):
+        bad = c2.post(
+            "/api/v1/auth/login",
+            json={"email": "nonexistent.rl@example.invalid", "password": "WrongPassword!2026"},
+        )
+        assert bad.status_code == 401
+
+    login_blocked = c1.post(
+        "/api/v1/auth/login",
+        json={"email": "nonexistent.rl@example.invalid", "password": "WrongPassword!2026"},
+    )
+    assert login_blocked.status_code == 429
+    assert login_blocked.json()["error"]["code"] == "RATE_LIMITED"
+    assert int(login_blocked.headers["Retry-After"]) >= 1
+
+
+def test_concurrent_dual_admin_downgrade_and_refresh_race_on_postgresql(
+    make_client: Callable[..., TestClient],
+) -> None:
+    admin1_client = make_client()
+    admin1_reg = _register_user(
+        admin1_client, prefix="conc_adm1", org_name="Concurrency Practice"
+    )
+    org_id = admin1_reg["organization"]["id"]
+    ws_id = admin1_reg["workspace"]["workspaceId"]
+
+    admin2_client = make_client()
+    admin2_reg = _register_user(admin2_client, prefix="conc_adm2")
+    admin2_email = admin2_reg["user"]["email"]
+    _onboard_user_to_org(
+        admin1_client,
+        org_id=org_id,
+        member_client=admin2_client,
+        email=admin2_email,
+    )
+
+    admin2_add = admin1_client.post(
+        f"/api/v1/workspaces/{ws_id}/memberships",
+        headers=_csrf_headers(admin1_client),
+        json={"email": admin2_email, "role": "WORKSPACE_ADMIN"},
+    )
+    assert admin2_add.status_code == 201
+    members = admin1_client.get(f"/api/v1/workspaces/{ws_id}/memberships").json()["items"]
+    admin1_mem_id = next(m["id"] for m in members if m["email"] == admin1_reg["user"]["email"])
+    admin2_mem_id = next(m["id"] for m in members if m["email"] == admin2_email)
+
+    # Admin 1 and Admin 2 simultaneously try to downgrade EACH OTHER -> deterministic Workspace lock
+    # prevents any deadlock; exactly 1 succeeds (200) and 1 gets 409 CANNOT_DOWNGRADE_LAST_ADMIN.
+    barrier = threading.Barrier(2)
+
+    def _downgrade(client: TestClient, target_membership_id: str) -> int:
+        barrier.wait(timeout=5)
+        resp = client.patch(
+            f"/api/v1/workspaces/{ws_id}/memberships/{target_membership_id}",
+            headers=_csrf_headers(client),
+            json={"role": "REVIEWER"},
+        )
+        return resp.status_code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(_downgrade, admin1_client, admin2_mem_id)
+        f2 = pool.submit(_downgrade, admin2_client, admin1_mem_id)
+        statuses = sorted([f1.result(timeout=15), f2.result(timeout=15)])
+
+    assert statuses == [200, 409]
+
+    # Concurrent refresh rotation using the same refresh token from two clients -> zero 500s
+    race_user = make_client()
+    _register_user(race_user, prefix="conc_ref")
+    shared_refresh = race_user.cookies.get(REFRESH_COOKIE_NAME, path="/api/v1/auth")
+    assert shared_refresh
+
+    racer_a = make_client()
+    racer_a.cookies.set(REFRESH_COOKIE_NAME, shared_refresh, path="/api/v1/auth")
+    racer_a.cookies.set(CSRF_COOKIE_NAME, "csrf-race-a", path="/")
+
+    racer_b = make_client()
+    racer_b.cookies.set(REFRESH_COOKIE_NAME, shared_refresh, path="/api/v1/auth")
+    racer_b.cookies.set(CSRF_COOKIE_NAME, "csrf-race-b", path="/")
+
+    ref_barrier = threading.Barrier(2)
+
+    def _refresh(client: TestClient, csrf_token: str) -> int:
+        ref_barrier.wait(timeout=5)
+        return client.post(
+            "/api/v1/auth/refresh",
+            headers={"X-CSRF-Token": csrf_token},
+        ).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rf1 = pool.submit(_refresh, racer_a, "csrf-race-a")
+        rf2 = pool.submit(_refresh, racer_b, "csrf-race-b")
+        ref_statuses = sorted([rf1.result(timeout=15), rf2.result(timeout=15)])
+
+    assert ref_statuses == [200, 401]
+
+
+def test_settings_null_rejection_duplicate_code_rollback_cookies_and_org_login_audit(
+    make_client: Callable[..., TestClient],
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_client()
+    reg = _register_user(client, prefix="misc_checks", org_name="Strict Practice")
+    org_id = reg["organization"]["id"]
+    ws_id = reg["workspace"]["workspaceId"]
+
+    # Non-nullable settings explicit null rejected (422), nullable tax IDs cleared (200)
+    for null_payload in [
+        {"enableDuplicateWarnings": None},
+        {"roundingTolerance": None},
+        {"legalEntityName": None},
+    ]:
+        null_resp = client.patch(
+            f"/api/v1/workspaces/{ws_id}/settings",
+            headers=_csrf_headers(client),
+            json=null_payload,
+        )
+        assert null_resp.status_code == 422
+        assert null_resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    clear_tax_resp = client.patch(
+        f"/api/v1/workspaces/{ws_id}/settings",
+        headers=_csrf_headers(client),
+        json={"companyGstin": None, "companyPan": None},
+    )
+    assert clear_tax_resp.status_code == 200
+    assert clear_tax_resp.json()["companyGstin"] is None
+    assert clear_tax_resp.json()["companyPan"] is None
+
+    # extra="forbid" returns 422 VALIDATION_ERROR
+    extra_resp = client.patch(
+        f"/api/v1/workspaces/{ws_id}/settings",
+        headers=_csrf_headers(client),
+        json={"unexpectedUnknownFlag": True},
+    )
+    assert extra_resp.status_code == 422
+    assert extra_resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    # Duplicate workspace code in same organization returns 409 WORKSPACE_CODE_EXISTS
+    dup_code = client.post(
+        f"/api/v1/organizations/{org_id}/workspaces",
+        headers=_csrf_headers(client),
+        json={
+            "name": "Duplicate Default",
+            "workspaceCode": "WS-DEFAULT-001",
+            "legalEntityName": "Duplicate LLP",
+        },
+    )
+    assert dup_code.status_code == 409
+    assert dup_code.json()["error"]["code"] == "WORKSPACE_CODE_EXISTS"
+
+    # Verify auth.login is emitted at organization scope (workspace_id=None) ONLY
+    other_org_client = make_client()
+    other_org_client.cookies.clear()
+    login_resp = other_org_client.post(
+        "/api/v1/auth/login",
+        json={"email": reg["user"]["email"], "password": "StrongPractice!2026"},
+    )
+    assert login_resp.status_code == 200
+
+    login_events = list(
+        db_session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.organization_id == uuid.UUID(org_id),
+                AuditEvent.event_type == "auth.login",
+            )
+        )
+    )
+    assert login_events
+    assert all(ev.workspace_id is None for ev in login_events)
+
+    # Verify refresh cookie Path=/api/v1/auth prevents transmission to workspace routes
+    @other_org_client.app.get("/api/v1/workspaces/_test_cookie_scope")
+    def _inspect_cookies(request: object) -> dict[str, list[str]]:
+        from fastapi import Request
+
+        assert isinstance(request, Request)
+        return {"cookieNames": sorted(request.cookies.keys())}
+
+    cookie_probe = other_org_client.get("/api/v1/workspaces/_test_cookie_scope")
+    assert cookie_probe.status_code == 200
+    assert REFRESH_COOKIE_NAME not in cookie_probe.json()["cookieNames"]
+
+    # Verify logout Set-Cookie headers clear all 3 cookies with Max-Age=0
+    logout_resp = other_org_client.post(
+        "/api/v1/auth/logout",
+        headers=_csrf_headers(other_org_client),
+    )
+    assert logout_resp.status_code == 204
+    cleared_headers = "\n".join(logout_resp.headers.get_list("set-cookie"))
+    for cookie_name in (ACCESS_COOKIE_NAME, REFRESH_COOKIE_NAME, CSRF_COOKIE_NAME):
+        assert f"{cookie_name}=" in cleared_headers
+    assert "max-age=0" in cleared_headers.lower()
+
+    # Transaction rollback atomicity: failure on audit write during registration rolls back User/Org/WS
+    import app.services.auth_service as auth_service_mod
+
+    def _boom_audit(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated audit failure mid-registration")
+
+    monkeypatch.setattr(auth_service_mod, "record_audit_event", _boom_audit)
+    rollback_client = make_client(raise_server_exceptions=False)
+    rollback_email = f"rollback.{uuid.uuid4().hex[:8]}@example.invalid"
+    fail_resp = rollback_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": rollback_email,
+            "password": "StrongPractice!2026",
+            "fullName": "Rollback Test",
+            "organizationName": f"Rollback Firm {uuid.uuid4().hex[:6]}",
+        },
+    )
+    assert fail_resp.status_code == 500
+    assert fail_resp.json()["error"]["code"] == "INTERNAL_ERROR"
+    assert fail_resp.json()["error"]["requestId"]
+    assert db_session.scalar(select(User).where(User.email == rollback_email)) is None
+

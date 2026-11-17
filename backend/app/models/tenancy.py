@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -417,3 +418,94 @@ class WorkspaceMembership(Base):
     invited_by_user: Mapped[User | None] = relationship(
         foreign_keys=[invited_by_user_id]
     )
+
+
+class OrganizationInvitation(Base):
+    __tablename__ = "organization_invitations"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('ORG_ADMIN', 'ORG_MEMBER')",
+            name="org_invite_role_valid",
+        ),
+        CheckConstraint(
+            "invited_email = lower(trim(invited_email))",
+            name="org_invite_email_lower",
+        ),
+        Index(
+            "ix_org_invitations_org_email",
+            "organization_id",
+            "invited_email",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    invited_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    invited_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    accepted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        default=utc_now,
+    )
+
+    organization: Mapped[Organization] = relationship()
+    invited_by_user: Mapped[User | None] = relationship(
+        foreign_keys=[invited_by_user_id]
+    )
+    accepted_by_user: Mapped[User | None] = relationship(
+        foreign_keys=[accepted_by_user_id]
+    )
+
+
+class AuthRateLimitBucket(Base):
+    __tablename__ = "auth_rate_limit_buckets"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="rate_limit_attempt_non_neg",
+        ),
+    )
+
+    bucket_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    window_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    blocked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        default=utc_now,
+        onupdate=utc_now,
+    )
+

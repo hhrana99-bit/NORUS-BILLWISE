@@ -43,7 +43,7 @@ def record_audit_event(
         summary=summary,
         tone=tone,
         event_metadata=metadata or {},
-        ip_address=ip_address,
+        ip_address=(ip_address or "")[:64] or None,
     )
     db.add(event)
     return event
