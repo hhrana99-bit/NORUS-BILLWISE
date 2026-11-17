@@ -1,11 +1,71 @@
-"""Pydantic v2 API schemas."""
+"""Shared Pydantic schema exports."""
 
-from app.schemas.base import ApiModel, ErrorDetail, ErrorResponse, HealthResponse, ReadyResponse
+from app.schemas.auth import (
+    LoginRequest,
+    LoginResponse,
+    MeResponse,
+    OrganizationMembershipSummaryDto,
+    RefreshResponse,
+    RegisterRequest,
+    RegisterResponse,
+    UserSummaryDto,
+    WorkspaceMembershipSummaryDto,
+)
+from app.schemas.base import (
+    ApiModel,
+    ErrorDetail,
+    ErrorResponse,
+    HealthResponse,
+    ReadyResponse,
+)
+from app.schemas.tenancy import (
+    AuditEventDto,
+    AuditEventListResponse,
+    MembershipCreateRequest,
+    MembershipDto,
+    MembershipListResponse,
+    MembershipUpdateRequest,
+    OrganizationCreateRequest,
+    OrganizationDto,
+    OrganizationListResponse,
+    WorkspaceCreateRequest,
+    WorkspaceDetailDto,
+    WorkspaceListItemDto,
+    WorkspaceListResponse,
+    WorkspaceProvisionResponse,
+    WorkspaceSettingsDto,
+    WorkspaceSettingsUpdateRequest,
+)
 
 __all__ = [
     "ApiModel",
+    "AuditEventDto",
+    "AuditEventListResponse",
     "ErrorDetail",
     "ErrorResponse",
     "HealthResponse",
+    "LoginRequest",
+    "LoginResponse",
+    "MeResponse",
+    "MembershipCreateRequest",
+    "MembershipDto",
+    "MembershipListResponse",
+    "MembershipUpdateRequest",
+    "OrganizationCreateRequest",
+    "OrganizationDto",
+    "OrganizationListResponse",
+    "OrganizationMembershipSummaryDto",
     "ReadyResponse",
+    "RefreshResponse",
+    "RegisterRequest",
+    "RegisterResponse",
+    "UserSummaryDto",
+    "WorkspaceCreateRequest",
+    "WorkspaceDetailDto",
+    "WorkspaceListItemDto",
+    "WorkspaceListResponse",
+    "WorkspaceMembershipSummaryDto",
+    "WorkspaceProvisionResponse",
+    "WorkspaceSettingsDto",
+    "WorkspaceSettingsUpdateRequest",
 ]

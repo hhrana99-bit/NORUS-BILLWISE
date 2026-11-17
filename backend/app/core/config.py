@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     )
     document_storage_root: str = "./var/documents"
     db_echo: bool = False
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 14
+    jwt_issuer: str = "norus-billwise-api"
+    jwt_audience: str = "norus-billwise-app"
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -73,6 +77,12 @@ class Settings(BaseSettings):
 
         if not self.api_v1_prefix.startswith("/"):
             raise ValueError("API_V1_PREFIX must begin with '/'.")
+
+        if self.access_token_expire_minutes < 1:
+            raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES must be at least 1.")
+
+        if self.refresh_token_expire_days < 1:
+            raise ValueError("REFRESH_TOKEN_EXPIRE_DAYS must be at least 1.")
 
         for origin in self.cors_origins:
             if origin.strip() == "*":

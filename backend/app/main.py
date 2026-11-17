@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1 import api_v1_router
 from app.core.config import Settings, get_settings
+from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
 from app.db.session import create_db_engine, create_session_factory
 
@@ -44,6 +46,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.engine = engine
     application.state.session_factory = session_factory
 
+    @application.middleware("http")
+    async def attach_request_id(request: Request, call_next: Any) -> Any:
+        request_id = f"req_{uuid.uuid4().hex[:16]}"
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers.setdefault("X-Request-ID", request_id)
+        return response
+
     application.add_middleware(
         CORSMiddleware,
         allow_origins=active_settings.cors_origins,
@@ -52,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["Content-Type", "X-CSRF-Token"],
     )
 
+    register_exception_handlers(application)
     application.include_router(api_v1_router, prefix=active_settings.api_v1_prefix)
     return application
 
