@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -1626,16 +1627,12 @@ def test_settings_null_rejection_duplicate_code_rollback_cookies_and_org_login_a
 
     # Verify refresh cookie Path=/api/v1/auth prevents transmission to non-auth /api/v1 routes
     @other_org_client.app.get("/api/v1/_test_cookie_scope")
-    def _inspect_non_auth_cookies(request: object) -> dict[str, list[str]]:
-        from fastapi import Request
-
+    def _inspect_non_auth_cookies(request: Request) -> dict[str, list[str]]:
         assert isinstance(request, Request)
         return {"cookieNames": sorted(request.cookies.keys())}
 
     @other_org_client.app.get("/api/v1/auth/_test_cookie_scope")
-    def _inspect_auth_cookies(request: object) -> dict[str, list[str]]:
-        from fastapi import Request
-
+    def _inspect_auth_cookies(request: Request) -> dict[str, list[str]]:
         assert isinstance(request, Request)
         return {"cookieNames": sorted(request.cookies.keys())}
 
@@ -1741,6 +1738,20 @@ def test_prevent_orphaned_workspaces_when_suspending_or_removing_org_member(
         ).status_code
         == 204
     )
+
+    # Removing the owner's ws2 membership revokes all active sessions for the owner
+    assert owner_client.get("/api/v1/auth/me").status_code == 401
+
+    # Re-authenticate the owner using a fresh client/session before subsequent requests
+    owner_client = make_client()
+    owner_relogin = owner_client.post(
+        "/api/v1/auth/login",
+        json={
+            "email": owner_reg["user"]["email"],
+            "password": "StrongPractice!2026",
+        },
+    )
+    assert owner_relogin.status_code == 200
 
     # Member B is now the sole active WORKSPACE_ADMIN on ws2
     org_members = owner_client.get(
