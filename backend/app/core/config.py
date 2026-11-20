@@ -101,6 +101,10 @@ class Settings(BaseSettings):
         if not self.api_v1_prefix.startswith("/"):
             raise ValueError("API_V1_PREFIX must begin with '/'.")
 
+        if not self.document_storage_root.strip():
+            raise ValueError("DOCUMENT_STORAGE_ROOT cannot be blank.")
+        self.document_storage_root = self.document_storage_root.strip()
+
         if self.access_token_expire_minutes < 1:
             raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES must be at least 1.")
 
