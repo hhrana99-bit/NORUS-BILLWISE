@@ -67,6 +67,12 @@ def _normalize_category(value: str) -> str:
     return cleaned
 
 
+def _strip_optional_text(value: object) -> object:
+    if isinstance(value, str):
+        return value.strip()
+    return value
+
+
 class SupplierCreateRequest(ApiModel):
     name: str = Field(..., min_length=1, max_length=240)
     gstin: str | None = Field(default=None, max_length=15)
@@ -81,6 +87,11 @@ class SupplierCreateRequest(ApiModel):
     @classmethod
     def validate_name(cls, value: str) -> str:
         return clean_supplier_display_name(value)
+
+    @field_validator("gstin", "pan", mode="before")
+    @classmethod
+    def strip_tax_ids_before_length_check(cls, value: object) -> object:
+        return _strip_optional_text(value)
 
     @field_validator("gstin")
     @classmethod
@@ -142,6 +153,11 @@ class SupplierUpdateRequest(ApiModel):
         if value is None:
             return None
         return clean_supplier_display_name(value)
+
+    @field_validator("gstin", "pan", mode="before")
+    @classmethod
+    def strip_tax_ids_before_length_check(cls, value: object) -> object:
+        return _strip_optional_text(value)
 
     @field_validator("gstin")
     @classmethod

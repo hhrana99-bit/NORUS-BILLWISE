@@ -107,6 +107,46 @@ def test_supplier_schema_rejects_invalid_tax_ids_extra_keys_and_non_nullable_nul
     assert cleared.state_code is None
     assert cleared.email is None
 
+    # Whitespace-padded valid GSTIN/PAN normalize cleanly on PATCH too; whitespace-only becomes None
+    patched = SupplierUpdateRequest(
+        gstin=" \t29aaacv9102k1z8\n ",
+        pan="  aaacv9102k  ",
+    )
+    assert patched.gstin == "29AAACV9102K1Z8"
+    assert patched.pan == "AAACV9102K"
+
+    blank_cleared = SupplierUpdateRequest(gstin="   ", pan="\t ")
+    assert blank_cleared.gstin is None
+    assert blank_cleared.pan is None
+
+    # Maximum-length constraints remain enforced after stripping whitespace
+    with pytest.raises(ValidationError) as overlong_create_gstin:
+        SupplierCreateRequest(name="Overlong GSTIN", gstin=" 29aaacv9102k1z89 ")
+    assert overlong_create_gstin.value.errors()[0]["type"] == "string_too_long"
+
+    with pytest.raises(ValidationError) as overlong_create_pan:
+        SupplierCreateRequest(name="Overlong PAN", pan=" aaacv9102kx ")
+    assert overlong_create_pan.value.errors()[0]["type"] == "string_too_long"
+
+    with pytest.raises(ValidationError) as overlong_update_gstin:
+        SupplierUpdateRequest(gstin=" 29aaacv9102k1z89 ")
+    assert overlong_update_gstin.value.errors()[0]["type"] == "string_too_long"
+
+    with pytest.raises(ValidationError) as overlong_update_pan:
+        SupplierUpdateRequest(pan=" aaacv9102kx ")
+    assert overlong_update_pan.value.errors()[0]["type"] == "string_too_long"
+
+    # Invalid 15-char GSTIN / 10-char PAN with padding still rejected after stripping
+    with pytest.raises(ValidationError, match="gstin"):
+        SupplierCreateRequest(name="Invalid Padded GSTIN", gstin=" INVALID12345678 ")
+
+    with pytest.raises(ValidationError, match="pan"):
+        SupplierCreateRequest(name="Invalid Padded PAN", pan=" BADPAN1234 ")
+
+    # Non-string input produces clean ValidationError (not AttributeError)
+    with pytest.raises(ValidationError):
+        SupplierCreateRequest.model_validate({"name": "Non-String GSTIN", "gstin": 12345})
+
 
 def test_supplier_summary_dto_serializes_decimal_total_as_two_decimal_string() -> None:
     now = utc_now()
