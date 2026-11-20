@@ -19,25 +19,29 @@ _GSTIN_REGEX = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
 _PAN_REGEX = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
 
 
-def normalize_and_validate_gstin(value: str | None) -> str | None:
+def normalize_and_validate_gstin(
+    value: str | None, *, field_label: str = "companyGstin"
+) -> str | None:
     if value is None:
         return None
     cleaned = value.strip().upper()
     if not cleaned:
         return None
     if not _GSTIN_REGEX.fullmatch(cleaned):
-        raise ValueError("companyGstin must be a valid 15-character Indian GSTIN.")
+        raise ValueError(f"{field_label} must be a valid 15-character Indian GSTIN.")
     return cleaned
 
 
-def normalize_and_validate_pan(value: str | None) -> str | None:
+def normalize_and_validate_pan(
+    value: str | None, *, field_label: str = "companyPan"
+) -> str | None:
     if value is None:
         return None
     cleaned = value.strip().upper()
     if not cleaned:
         return None
     if not _PAN_REGEX.fullmatch(cleaned):
-        raise ValueError("companyPan must be a valid 10-character Indian PAN.")
+        raise ValueError(f"{field_label} must be a valid 10-character Indian PAN.")
     return cleaned
 
 

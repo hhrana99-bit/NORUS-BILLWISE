@@ -228,26 +228,30 @@
 ## 5. Suppliers Endpoints
 
 ### `GET /api/v1/workspaces/{workspaceId}/suppliers`
-- **Purpose:** Search/filter suppliers with aggregated `totalInvoices`, `totalValue`, and `lastInvoiceDate` (excluding soft-deleted invoices).
-- **Auth:** Any active workspace member.
-- **Query Params:** `search`, `status` (`VERIFIED|NEEDS_VERIFICATION|FLAGGED`), `page`, `pageSize`.
-- **Response (`200 OK`):** `{ "items": [...], "total": 6, "page": 1, "pageSize": 25 }`.
+- **Purpose:** Search/filter workspace suppliers with SQL-aggregated `totalInvoices`, `totalValue`, and `lastInvoiceDate` (excluding soft-deleted invoices where `deleted_at IS NOT NULL`).
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`.
+- **Query Params:** `search`, `status` (`VERIFIED|NEEDS_VERIFICATION|FLAGGED`), `page` (`>= 1`, default `1`), `pageSize` (`1..100`, default `25`).
+- **Response (`200 OK`):** `{ "items": [SupplierSummaryDto...], "total": 6, "page": 1, "pageSize": 25 }`.
+- **Errors:** `401 UNAUTHENTICATED`, `404 WORKSPACE_NOT_FOUND`, `422 VALIDATION_ERROR`.
 
 ### `POST /api/v1/workspaces/{workspaceId}/suppliers`
-- **Purpose:** Create a supplier master record inside the workspace.
-- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER` + CSRF.
-- **Request Body:** `{ "name": "...", "gstin": "27AABCA4821M1Z4", "stateCode": "27", "stateName": "Maharashtra", "category": "...", "email": "..." }`
-- **Response (`201 Created`):** Supplier DTO (`normalizedName` computed server-side).
+- **Purpose:** Create a workspace-scoped supplier master record with server-side `normalizedName` (trimmed, collapsed whitespace, lowercased), validated GSTIN/PAN/stateCode/email, and compliance `audit_events` entry.
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER` + CSRF (`Origin`/`Referer` + `X-CSRF-Token`).
+- **Request Body:** `{ "name": "...", "gstin": "27AABCA4821M1Z4", "pan": "AABCA4821M", "stateCode": "27", "stateName": "Maharashtra", "category": "...", "email": "...", "status": "NEEDS_VERIFICATION" }`.
+- **Response (`201 Created`):** `SupplierDto` (`normalizedName` computed server-side).
+- **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 WORKSPACE_NOT_FOUND`, `409 SUPPLIER_NAME_EXISTS`, `409 SUPPLIER_GSTIN_EXISTS`, `422 VALIDATION_ERROR`.
 
 ### `GET /api/v1/workspaces/{workspaceId}/suppliers/{supplierId}`
-- **Purpose:** Retrieve supplier details and invoice aggregates.
-- **Auth:** Any active workspace member.
-- **Response (`200 OK`):** Supplier summary DTO.
+- **Purpose:** Retrieve workspace-scoped supplier details and invoice aggregates (`totalInvoices`, `totalValue`, `lastInvoiceDate` excluding soft-deleted invoices). Foreign-workspace `supplierId`s return `404`.
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`.
+- **Response (`200 OK`):** `SupplierSummaryDto`.
+- **Errors:** `401 UNAUTHENTICATED`, `404 WORKSPACE_NOT_FOUND`, `404 SUPPLIER_NOT_FOUND`.
 
 ### `PATCH /api/v1/workspaces/{workspaceId}/suppliers/{supplierId}`
-- **Purpose:** Update supplier GSTIN, category, contact email, or verification status.
-- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER` + CSRF.
-- **Response (`200 OK`):** Updated Supplier DTO.
+- **Purpose:** Partially update mutable supplier fields (`name`, `gstin`, `pan`, `stateCode`, `stateName`, `category`, `email`, `status`), recalculate `normalizedName` when `name` changes, reject immutable keys (`id`, `workspaceId`, `normalizedName`, timestamps) via `extra="forbid"`, and emit an `audit_events` entry.
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER` + CSRF (`Origin`/`Referer` + `X-CSRF-Token`).
+- **Response (`200 OK`):** Updated `SupplierDto`.
+- **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 WORKSPACE_NOT_FOUND`, `404 SUPPLIER_NOT_FOUND`, `409 SUPPLIER_NAME_EXISTS`, `409 SUPPLIER_GSTIN_EXISTS`, `422 VALIDATION_ERROR`.
 
 ---
 

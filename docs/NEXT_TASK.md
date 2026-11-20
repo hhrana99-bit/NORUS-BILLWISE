@@ -2,7 +2,7 @@
 
 ## Immediate Verification Prerequisite (Run Outside Container Runtime)
 
-Before starting Task 002.4 feature endpoints, push/sync Task 002.3 Batch 2 + Batch 2.1 to GitHub `main` (or execute locally on **Python 3.12+ + PostgreSQL 16+**) to verify Alembic `0001`–`0002` migrations and the full `pytest` suite:
+Before starting Task 002.4B implementation, merge/apply the Task 002.4A Suppliers Master PR on top of `main` (`a873fcb`) and run the full `pytest` suite on **Python 3.12+ + PostgreSQL 16+** (locally or via GitHub Actions CI) to verify `test_suppliers.py` alongside the existing backend suite:
 
 ```bash
 cd backend
@@ -16,25 +16,31 @@ pytest -v -ra
 
 ---
 
-## Next Development Milestone: NORUS BILLWISE TASK 002.4 — Suppliers Master & Secure Document Storage (`DocumentStorage`)
+## Next Development Milestone: NORUS BILLWISE TASK 002.4B — Secure `DocumentStorage` & Document Upload/Streaming API
 
 ### Objective
-Implement workspace-scoped Suppliers Master CRUD and secure invoice document upload/streaming on top of the verified Task 002.3 cookie authentication, CSRF protection, and RBAC membership guards.
+Implement workspace-scoped document upload, pluggable `DocumentStorage` persistence, content validation, malware-scan gating, and safe binary streaming for Review Centre side-by-side previewing—reusing existing Task 002.3 auth/CSRF/RBAC guards and the existing `documents` and `invoices` tables from migration `0001_initial_foundation`.
 
 ### Deliverables
 
-1. **Suppliers Master Service & API (`app/api/v1/suppliers.py`, `app/services/supplier_service.py`, `app/schemas/suppliers.py`)**
-   - Implement `GET /api/v1/workspaces/{workspaceId}/suppliers` (search, `status` filter, pagination, SQL-aggregated `totalInvoices`, `totalValue`, `lastInvoiceDate` excluding soft-deleted invoices).
-   - Implement `POST /api/v1/workspaces/{workspaceId}/suppliers` (`WORKSPACE_ADMIN`, `REVIEWER` + CSRF) with server-side `normalized_name` computation and GSTIN validation.
-   - Implement `GET /api/v1/workspaces/{workspaceId}/suppliers/{supplierId}` and `PATCH /api/v1/workspaces/{workspaceId}/suppliers/{supplierId}` with strict `workspace_id` isolation (`404` across workspaces).
-2. **Pluggable Document Storage & Upload/Streaming (`app/services/storage_service.py`, `app/api/v1/documents.py`)**
-   - Implement `DocumentStorage` interface (`save`, `open_stream`, `delete`) with initial `LocalFilesystemStorage` rooted at `settings.document_storage_root`, path-traversal protection, and SHA-256 checksum computation.
-   - Implement `POST /api/v1/workspaces/{workspaceId}/documents` (`WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER` + CSRF): 15 MB size limit (`413 FILE_TOO_LARGE`), magic-byte MIME verification (`415 UNSUPPORTED_MEDIA_TYPE` for non-PDF/PNG/JPG/WEBP), `AuditEvent` logging, and optional draft `PENDING_REVIEW` invoice creation.
-   - Implement `GET /api/v1/workspaces/{workspaceId}/documents/{documentId}/content` streaming with `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store`, and `Content-Disposition` toggling via `download=true|false`.
-3. **Tests**
-   - Add PostgreSQL 16 integration tests covering supplier aggregates (excluding soft-deleted invoices), role gates (`VIEWER`/`UPLOADER` vs `REVIEWER`/`WORKSPACE_ADMIN`), magic-byte spoof rejection, oversized file rejection, path-traversal safety, content streaming headers, and cross-workspace `404` isolation.
+1. **Dependencies (`backend/requirements.txt`, `backend/pyproject.toml`)**
+   - Add pinned `python-multipart` for FastAPI `UploadFile` / `Form(...)` multipart parsing while keeping existing `httpx==0.27.2` and `pydantic-settings==2.7.0` pins intact.
+2. **Document Schemas (`backend/app/schemas/documents.py`)**
+   - Add `DocumentDto` and `DocumentUploadResponse` (`document`, nullable `invoiceId`) using `ApiModel` (`camelCase`, `extra="forbid"`).
+3. **Pluggable `DocumentStorage` & `LocalFilesystemStorage` (`backend/app/services/storage_service.py`)**
+   - Define a `DocumentStorage` Protocol/ABC (`save_stream`, `open_stream`, `delete`) to support future S3/MinIO adapters without changing domain logic.
+   - Implement `LocalFilesystemStorage` rooted at `settings.document_storage_root`:
+     - Generate deterministic server-only UUID storage keys (`orgs/{org_id}/workspaces/{ws_id}/{document_id}`).
+     - Canonicalize paths via `Path.resolve()` and enforce strict containment inside `root.resolve()` to prevent directory traversal (`../`, symlink escapes).
+     - Stream uploads in bounded chunks (`64 KB`), enforce the `15 MB` (`15_728_640` bytes) cap before buffering excess bytes (`413 FILE_TOO_LARGE`), inspect binary magic bytes (`%PDF-`, PNG, JPEG, WEBP) + extension/MIME consistency (`415 UNSUPPORTED_MEDIA_TYPE`), and compute `sha256_checksum` during streaming.
+     - Integrate synchronous/pluggable malware-scan hook (`scan_status`: `CLEAN`, `INFECTED`, `PENDING`, `SKIPPED_DEV` per configuration) so infected uploads are quarantined/rejected and blocked from streaming.
+4. **Document Domain Service & Router (`backend/app/services/document_service.py`, `backend/app/api/v1/documents.py`, `backend/app/api/v1/__init__.py`)**
+   - Implement `POST /api/v1/workspaces/{workspaceId}/documents` (`WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER` + CSRF): persist file -> insert `documents` row -> optionally create staged `PENDING_REVIEW` draft `invoices` row (`createDraftInvoice=true` default, using workspace buyer snapshot defaults) -> emit `document.uploaded` audit event; clean up written storage file safely if the database transaction rolls back.
+   - Implement `GET /api/v1/workspaces/{workspaceId}/documents/{documentId}/content` (`WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`): enforce strict `workspace_id` isolation (`404` across workspaces), block `INFECTED` documents (`403`/`422`), set `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store`, and `Content-Disposition: inline|attachment` (with sanitized filename) toggled by `download=true|false`.
+5. **PostgreSQL 16 Tests (`backend/tests/test_documents.py`)**
+   - Test valid PDF/PNG/JPG/WEBP uploads, optional draft invoice creation, magic-byte spoofing rejection (`415`), >15 MB bounded streaming rejection (`413`), path-traversal/filename sanitization, DB-failure storage rollback cleanup, `INFECTED` scan gating, `download=true|false` headers (`nosniff`, `no-store`), RBAC (`VIEWER` denied upload, `UPLOADER`/`REVIEWER`/`ADMIN` allowed), CSRF enforcement, and cross-workspace `404` isolation.
 
-### Subsequent Tasks (Following Task 002.4)
+### Subsequent Tasks (Following Task 002.4B)
 - **Task 002.5:** Invoices CRUD, Flexible Indian GST & Advisory Line-Item Reconciliation Engine, and Advisory Duplicate Detection.
 - **Task 002.6:** Human Review Workflow (`/verify`, `/flag`, `/flags/{flagId}/resolve`, `/reopen`, `WORKSPACE_ADMIN` draft soft-delete, immutable `review_actions` & `audit_events`).
 - **Task 002.7:** Reporting Aggregations, Formula-Safe CSV Export & Frontend `WorkspaceContext` API Integration (`credentials: 'include'` + `X-CSRF-Token`).
