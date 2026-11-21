@@ -94,13 +94,17 @@ def get_document_content(
         original_filename=document.original_filename,
         download=download,
     )
+    headers = {
+        "Content-Disposition": content_disposition,
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, no-store",
+        "Content-Length": str(document.byte_size),
+    }
+    if not download and document.mime_type == "application/pdf":
+        headers["Content-Security-Policy"] = "sandbox"
+
     return StreamingResponse(
         stream,
         media_type=document.mime_type,
-        headers={
-            "Content-Disposition": content_disposition,
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "private, no-store",
-            "Content-Length": str(document.byte_size),
-        },
+        headers=headers,
     )

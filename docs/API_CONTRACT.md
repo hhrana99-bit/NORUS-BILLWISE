@@ -258,22 +258,22 @@
 ## 6. Documents & Invoices Endpoints
 
 ### `POST /api/v1/workspaces/{workspaceId}/documents`
-- **Purpose:** Stream and validate a PDF/PNG/JPEG/WEBP invoice file (`multipart/form-data`), enforce bounded `<= 64 KB` chunk streaming (`15 MB` / `15,728,640` bytes maximum), verify extension + declared MIME + binary magic-byte signature (`%PDF-`, PNG, JPEG, WEBP), sanitize filename metadata, compute `sha256Checksum`, persist via `DocumentStorage` (`LocalFilesystemStorage` rooted at `DOCUMENT_STORAGE_ROOT` with server-generated UUID storage keys and canonical path containment), persist the `documents` row (`scanStatus = "PENDING"`), optionally stage a linked `PENDING_REVIEW` draft `invoices` row (`createDraftInvoice = true` default), and emit a `document.uploaded` audit event. Database rollback triggers best-effort storage cleanup.
+- **Purpose:** Enforce an ASGI-level `16 MiB` (`16,777,216` bytes: `15 MB` file cap + `1 MiB` multipart overhead) request-body limit before multipart parsing (rejecting both oversized `Content-Length` headers and chunked/unannounced streams exceeding the limit with `413 FILE_TOO_LARGE`), reject embedded NUL (`\x00`) bytes in optional `supplierName`/`invoiceNumber` form fields (`422 VALIDATION_ERROR`), stream and validate a PDF/PNG/JPEG/WEBP invoice file (`multipart/form-data`) in bounded `<= 64 KB` chunks up to `15 MB` (`15,728,640` bytes), verify extension + declared MIME + binary magic-byte signature (`%PDF-`, PNG, JPEG, WEBP), sanitize filename metadata, compute `sha256Checksum`, persist via `DocumentStorage` (`LocalFilesystemStorage` rooted at `DOCUMENT_STORAGE_ROOT` with server-generated UUID storage keys and canonical path containment), persist the `documents` row (`scanStatus = "PENDING"`, with PostgreSQL check constraint permitting `'PENDING' | 'CLEAN' | 'INFECTED' | 'FAILED' | 'SKIPPED_DEV'`), optionally stage a linked `PENDING_REVIEW` draft `invoices` row (`createDraftInvoice = true` default), and emit a `document.uploaded` audit event. Database rollback triggers best-effort storage cleanup.
 - **Malware Scanning Note:** Automated antivirus daemon integration (e.g., ClamAV / async scan worker) is deferred to a subsequent task. Uploaded documents are recorded as `scanStatus = "PENDING"` and strictly blocked from content streaming until explicitly verified `CLEAN`.
 - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER` + CSRF (`Origin`/`Referer` + `X-CSRF-Token`).
 - **Request (`multipart/form-data`):**
-  - `file`: binary (PDF, PNG, JPEG, or WEBP; max `15,728,640` bytes / 15 MB)
-  - `supplierName`: optional string (`max_length=240`, used for draft invoice `supplierNameSnapshot`)
-  - `invoiceNumber`: optional string (`max_length=100`, used for draft invoice `invoiceNumber`)
+  - `file`: binary (PDF, PNG, JPEG, or WEBP; max `15,728,640` bytes / 15 MB within `16,777,216`-byte request limit)
+  - `supplierName`: optional string (`max_length=240`, no NUL characters; used for draft invoice `supplierNameSnapshot`)
+  - `invoiceNumber`: optional string (`max_length=100`, no NUL characters; used for draft invoice `invoiceNumber`)
   - `createDraftInvoice`: boolean (default `true`)
 - **Response (`201 Created`):** `{ "document": { "id": "uuid", "workspaceId": "uuid", "uploadedByUserId": "uuid", "originalFilename": "invoice.pdf", "mimeType": "application/pdf", "byteSize": 102400, "sha256Checksum": "64-hex...", "pageCount": 1, "scanStatus": "PENDING", "createdAt": "..." }, "invoiceId": "uuid-or-null" }` *(internal `storageKey` and filesystem paths are never returned)*.
-- **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 WORKSPACE_NOT_FOUND`, `413 FILE_TOO_LARGE`, `415 UNSUPPORTED_MEDIA_TYPE`, `422 EMPTY_FILE`, `422 VALIDATION_ERROR`.
+- **Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 WORKSPACE_NOT_FOUND`, `413 FILE_TOO_LARGE`, `415 UNSUPPORTED_MEDIA_TYPE`, `422 EMPTY_FILE`, `422 VALIDATION_ERROR`.
 
 ### `GET /api/v1/workspaces/{workspaceId}/documents/{documentId}/content`
 - **Purpose:** Stream a verified `CLEAN` document safely from `DocumentStorage` to authorized active members of `{workspaceId}`. **Strictly requires `scanStatus == "CLEAN"`** in all environments (`INFECTED` returns `403 DOCUMENT_INFECTED`; `PENDING`, `SKIPPED_DEV`, and `FAILED` return `409 DOCUMENT_SCAN_NOT_CLEAN`).
 - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`.
 - **Query Params:** `download=true|false` (default `false`; controls `Content-Disposition: inline|attachment` using sanitized filename metadata).
-- **Response (`200 OK`):** Bounded `<= 64 KB` binary stream with server-verified `Content-Type`, `Content-Length`, `Content-Disposition`, `X-Content-Type-Options: nosniff`, and `Cache-Control: private, no-store`.
+- **Response (`200 OK`):** Bounded `<= 64 KB` binary stream with server-verified `Content-Type`, `Content-Length`, `Content-Disposition`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store`, and **`Content-Security-Policy: sandbox`** when serving `application/pdf` inline (`download=false`). *Note: CSP sandboxing is defense-in-depth for browser rendering and does not replace antivirus scanning or PDF sanitization.*
 - **Errors:** `401 UNAUTHENTICATED`, `403 DOCUMENT_INFECTED`, `404 WORKSPACE_NOT_FOUND`, `404 DOCUMENT_NOT_FOUND`, `404 DOCUMENT_CONTENT_NOT_FOUND`, `409 DOCUMENT_SCAN_NOT_CLEAN`.
 
 ### `GET /api/v1/workspaces/{workspaceId}/invoices`

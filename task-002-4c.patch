@@ -1,0 +1,1085 @@
+diff --git a/backend/alembic/versions/0003_document_failed_scan_status.py b/backend/alembic/versions/0003_document_failed_scan_status.py
+new file mode 100644
+index 0000000..5d1459b
+--- /dev/null
++++ b/backend/alembic/versions/0003_document_failed_scan_status.py
+@@ -0,0 +1,44 @@
++"""Allow FAILED status in documents.scan_status check constraint.
++
++Revision ID: 0003_doc_failed_scan_status
++Revises: 0002_invites_and_rate_limits
++Create Date: 2026-11-20 00:00:00+00:00
++
++"""
++from __future__ import annotations
++
++from collections.abc import Sequence
++
++from alembic import op
++
++# revision identifiers, used by Alembic.
++revision: str = "0003_doc_failed_scan_status"
++down_revision: str | Sequence[str] | None = "0002_invites_and_rate_limits"
++branch_labels: str | Sequence[str] | None = None
++depends_on: str | Sequence[str] | None = None
++
++
++def upgrade() -> None:
++    op.drop_constraint(
++        op.f("ck_documents_document_scan_status_valid"),
++        "documents",
++        type_="check",
++    )
++    op.create_check_constraint(
++        op.f("ck_documents_document_scan_status_valid"),
++        "documents",
++        "scan_status IN ('PENDING', 'CLEAN', 'INFECTED', 'FAILED', 'SKIPPED_DEV')",
++    )
++
++
++def downgrade() -> None:
++    op.drop_constraint(
++        op.f("ck_documents_document_scan_status_valid"),
++        "documents",
++        type_="check",
++    )
++    op.create_check_constraint(
++        op.f("ck_documents_document_scan_status_valid"),
++        "documents",
++        "scan_status IN ('PENDING', 'CLEAN', 'INFECTED', 'SKIPPED_DEV')",
++    )
+diff --git a/backend/app/api/v1/documents.py b/backend/app/api/v1/documents.py
+index 0ee73c2..8b24e99 100644
+--- a/backend/app/api/v1/documents.py
++++ b/backend/app/api/v1/documents.py
+@@ -94,13 +94,17 @@ def get_document_content(
+         original_filename=document.original_filename,
+         download=download,
+     )
++    headers = {
++        "Content-Disposition": content_disposition,
++        "X-Content-Type-Options": "nosniff",
++        "Cache-Control": "private, no-store",
++        "Content-Length": str(document.byte_size),
++    }
++    if not download and document.mime_type == "application/pdf":
++        headers["Content-Security-Policy"] = "sandbox"
++
+     return StreamingResponse(
+         stream,
+         media_type=document.mime_type,
+-        headers={
+-            "Content-Disposition": content_disposition,
+-            "X-Content-Type-Options": "nosniff",
+-            "Cache-Control": "private, no-store",
+-            "Content-Length": str(document.byte_size),
+-        },
++        headers=headers,
+     )
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 6d46a56..7a52420 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -1,17 +1,190 @@
+ from __future__ import annotations
+ 
++import re
+ import uuid
+ from contextlib import asynccontextmanager
+ from typing import Any
+ 
+-from fastapi import FastAPI, Request
++from fastapi import FastAPI, status
+ from fastapi.middleware.cors import CORSMiddleware
++from starlette.types import ASGIApp, Message, Receive, Scope, Send
+ 
+ from app.api.v1 import api_v1_router
+ from app.core.config import Settings, get_settings
+-from app.core.errors import register_exception_handlers
++from app.core.errors import AppError, build_error_response, register_exception_handlers
+ from app.core.logging import configure_logging
+ from app.db.session import create_db_engine, create_session_factory
++from app.services.storage_service import MAX_DOCUMENT_UPLOAD_REQUEST_BYTES
++
++UPLOAD_SIZE_LIMIT_MESSAGE = (
++    "Document upload request body exceeds the 16 MiB maximum request size "
++    "(15 MB file limit plus 1 MiB multipart overhead)."
++)
++
++
++class _UploadSizeExceededError(AppError):
++    """Internal ASGI control-flow AppError raised when streamed upload body crosses limit."""
++
++    def __init__(self) -> None:
++        super().__init__(
++            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
++            code="FILE_TOO_LARGE",
++            message=UPLOAD_SIZE_LIMIT_MESSAGE,
++        )
++
++
++class RequestIdMiddleware:
++    """Pure ASGI middleware attaching a per-request ID to scope.state and X-Request-ID header."""
++
++    def __init__(self, app: ASGIApp) -> None:
++        self.app = app
++
++    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
++        if scope["type"] != "http":
++            await self.app(scope, receive, send)
++            return
++
++        request_id = f"req_{uuid.uuid4().hex[:16]}"
++        scope_state = scope.setdefault("state", {})
++        if isinstance(scope_state, dict):
++            scope_state["request_id"] = request_id
++
++        async def send_with_request_id(message: Message) -> None:
++            if message["type"] == "http.response.start":
++                raw_headers = list(message.get("headers", []))
++                has_header = any(
++                    name.lower() == b"x-request-id" for name, _ in raw_headers
++                )
++                if not has_header:
++                    raw_headers.append((b"x-request-id", request_id.encode("ascii")))
++                    message = {**message, "headers": raw_headers}
++            await send(message)
++
++        await self.app(scope, receive, send_with_request_id)
++
++
++class DocumentUploadSizeLimitMiddleware:
++    """Enforce request-body size limit on workspace document uploads before multipart parsing."""
++
++    def __init__(
++        self,
++        app: ASGIApp,
++        *,
++        api_v1_prefix: str = "/api/v1",
++        max_request_bytes: int = MAX_DOCUMENT_UPLOAD_REQUEST_BYTES,
++    ) -> None:
++        self.app = app
++        prefix = api_v1_prefix.rstrip("/") or "/api/v1"
++        self._upload_path_re = re.compile(
++            rf"^{re.escape(prefix)}/workspaces/[^/]+/documents$"
++        )
++        self.max_request_bytes = max_request_bytes
++
++    def _matches_upload_route(self, scope: Scope) -> bool:
++        if scope["type"] != "http":
++            return False
++        if scope.get("method", "").upper() != "POST":
++            return False
++        path = scope.get("path", "")
++        return bool(self._upload_path_re.match(path))
++
++    @staticmethod
++    def _extract_content_lengths(scope: Scope) -> list[int]:
++        lengths: list[int] = []
++        for name, value in scope.get("headers", []):
++            if name.lower() == b"content-length":
++                parsed = int(value.decode("ascii").strip())
++                if parsed < 0:
++                    raise ValueError("Negative Content-Length")
++                lengths.append(parsed)
++        return lengths
++
++    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
++        if not self._matches_upload_route(scope):
++            await self.app(scope, receive, send)
++            return
++
++        scope_state = scope.get("state")
++        request_id = (
++            scope_state.get("request_id") if isinstance(scope_state, dict) else None
++        )
++
++        try:
++            content_lengths = self._extract_content_lengths(scope)
++        except (UnicodeDecodeError, ValueError):
++            response = build_error_response(
++                status_code=status.HTTP_400_BAD_REQUEST,
++                code="VALIDATION_ERROR",
++                message="Invalid Content-Length header.",
++                request_id=request_id,
++            )
++            await response(scope, receive, send)
++            return
++
++        if content_lengths and (
++            len(set(content_lengths)) > 1
++            or any(length > self.max_request_bytes for length in content_lengths)
++        ):
++            if len(set(content_lengths)) > 1:
++                response = build_error_response(
++                    status_code=status.HTTP_400_BAD_REQUEST,
++                    code="VALIDATION_ERROR",
++                    message="Conflicting Content-Length headers.",
++                    request_id=request_id,
++                )
++            else:
++                response = build_error_response(
++                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
++                    code="FILE_TOO_LARGE",
++                    message=UPLOAD_SIZE_LIMIT_MESSAGE,
++                    request_id=request_id,
++                )
++            await response(scope, receive, send)
++            return
++
++        bytes_received = 0
++        limit_exceeded = False
++        response_started = False
++        suppress_inner_error = False
++
++        async def counting_receive() -> Message:
++            nonlocal bytes_received, limit_exceeded
++            message = await receive()
++            if message["type"] == "http.request":
++                chunk = message.get("body", b"")
++                bytes_received += len(chunk)
++                if bytes_received > self.max_request_bytes:
++                    limit_exceeded = True
++                    raise _UploadSizeExceededError()
++            return message
++
++        async def guarded_send(message: Message) -> None:
++            nonlocal response_started, suppress_inner_error
++            if message["type"] == "http.response.start":
++                if limit_exceeded and not response_started and message.get("status") != 413:
++                    suppress_inner_error = True
++                    return
++                response_started = True
++                await send(message)
++                return
++
++            if suppress_inner_error:
++                return
++            await send(message)
++
++        try:
++            await self.app(scope, counting_receive, guarded_send)
++        except _UploadSizeExceededError:
++            pass
++
++        if limit_exceeded and not response_started:
++            response = build_error_response(
++                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
++                code="FILE_TOO_LARGE",
++                message=UPLOAD_SIZE_LIMIT_MESSAGE,
++                request_id=request_id,
++            )
++            await response(scope, receive, send)
+ 
+ 
+ def create_app(settings: Settings | None = None) -> FastAPI:
+@@ -46,14 +219,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+     application.state.engine = engine
+     application.state.session_factory = session_factory
+ 
+-    @application.middleware("http")
+-    async def attach_request_id(request: Request, call_next: Any) -> Any:
+-        request_id = f"req_{uuid.uuid4().hex[:16]}"
+-        request.state.request_id = request_id
+-        response = await call_next(request)
+-        response.headers.setdefault("X-Request-ID", request_id)
+-        return response
++    register_exception_handlers(application)
++    application.include_router(api_v1_router, prefix=active_settings.api_v1_prefix)
+ 
++    # Middleware execution order (outermost added last):
++    # CORSMiddleware -> RequestIdMiddleware -> DocumentUploadSizeLimitMiddleware -> router
++    application.add_middleware(
++        DocumentUploadSizeLimitMiddleware,
++        api_v1_prefix=active_settings.api_v1_prefix,
++        max_request_bytes=MAX_DOCUMENT_UPLOAD_REQUEST_BYTES,
++    )
++    application.add_middleware(RequestIdMiddleware)
+     application.add_middleware(
+         CORSMiddleware,
+         allow_origins=active_settings.cors_origins,
+@@ -61,9 +237,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
+         allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+         allow_headers=["Content-Type", "X-CSRF-Token"],
+     )
+-
+-    register_exception_handlers(application)
+-    application.include_router(api_v1_router, prefix=active_settings.api_v1_prefix)
+     return application
+ 
+ 
+diff --git a/backend/app/models/accounting.py b/backend/app/models/accounting.py
+index 7372599..07e4517 100644
+--- a/backend/app/models/accounting.py
++++ b/backend/app/models/accounting.py
+@@ -109,7 +109,7 @@ class Document(Base):
+         ),
+         CheckConstraint("page_count >= 1", name="document_page_count_min"),
+         CheckConstraint(
+-            "scan_status IN ('PENDING', 'CLEAN', 'INFECTED', 'SKIPPED_DEV')",
++            "scan_status IN ('PENDING', 'CLEAN', 'INFECTED', 'FAILED', 'SKIPPED_DEV')",
+             name="document_scan_status_valid",
+         ),
+         Index("ix_documents_workspace_sha256", "workspace_id", "sha256_checksum"),
+diff --git a/backend/app/services/document_service.py b/backend/app/services/document_service.py
+index 15231d0..3b14380 100644
+--- a/backend/app/services/document_service.py
++++ b/backend/app/services/document_service.py
+@@ -26,9 +26,20 @@ from app.services.storage_service import (
+ logger = logging.getLogger(__name__)
+ 
+ 
+-def _clean_optional_text(value: str | None, *, max_len: int) -> str | None:
++def _clean_optional_text(
++    value: str | None,
++    *,
++    max_len: int,
++    field_label: str = "field",
++) -> str | None:
+     if value is None:
+         return None
++    if "\x00" in value:
++        raise AppError(
++            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
++            code="VALIDATION_ERROR",
++            message=f"{field_label} contains invalid NUL characters.",
++        )
+     cleaned = " ".join(value.strip().split())
+     if not cleaned:
+         return None
+@@ -54,6 +65,16 @@ def upload_workspace_document(
+         raw_filename=raw_filename,
+         declared_content_type=declared_content_type,
+     )
++    cleaned_supplier_name = _clean_optional_text(
++        supplier_name,
++        max_len=240,
++        field_label="supplierName",
++    )
++    cleaned_invoice_number = _clean_optional_text(
++        invoice_number,
++        max_len=100,
++        field_label="invoiceNumber",
++    )
+ 
+     document_id = uuid.uuid4()
+     storage_key = build_workspace_document_storage_key(
+@@ -107,13 +128,9 @@ def upload_workspace_document(
+                 ws_settings.company_gstin if ws_settings is not None else None
+             )
+ 
+-            resolved_supplier_name = (
+-                _clean_optional_text(supplier_name, max_len=240)
+-                or "Pending Extraction"
+-            )
++            resolved_supplier_name = cleaned_supplier_name or "Pending Extraction"
+             resolved_invoice_number = (
+-                _clean_optional_text(invoice_number, max_len=100)
+-                or f"DRAFT-{str(document.id)[:8].upper()}"
++                cleaned_invoice_number or f"DRAFT-{str(document.id)[:8].upper()}"
+             )
+             normalized_invoice_number = resolved_invoice_number.strip().lower()[:100]
+ 
+diff --git a/backend/app/services/storage_service.py b/backend/app/services/storage_service.py
+index 458ac7a..d454aef 100644
+--- a/backend/app/services/storage_service.py
++++ b/backend/app/services/storage_service.py
+@@ -16,6 +16,10 @@ from fastapi import status
+ from app.core.errors import AppError
+ 
+ MAX_DOCUMENT_BYTES = 15 * 1024 * 1024  # 15 MB (15,728,640 bytes)
++MAX_MULTIPART_OVERHEAD_BYTES = 1 * 1024 * 1024  # 1 MiB (1,048,576 bytes) for multipart boundaries/fields
++MAX_DOCUMENT_UPLOAD_REQUEST_BYTES = (
++    MAX_DOCUMENT_BYTES + MAX_MULTIPART_OVERHEAD_BYTES
++)  # 16 MiB (16,777,216 bytes) total HTTP request-body cap enforced before multipart parsing
+ STREAM_CHUNK_SIZE = 65_536  # 64 KB bounded streaming chunks
+ MAGIC_HEADER_PEEK_BYTES = 16
+ 
+diff --git a/backend/tests/test_documents.py b/backend/tests/test_documents.py
+index 5438491..0adf4f1 100644
+--- a/backend/tests/test_documents.py
++++ b/backend/tests/test_documents.py
+@@ -1,7 +1,9 @@
+ from __future__ import annotations
+ 
++import asyncio
+ import hashlib
+ import io
++import json
+ import os
+ import uuid
+ from collections.abc import Callable, Generator
+@@ -23,16 +25,20 @@ from sqlalchemy.orm import Session, sessionmaker
+ from app.core.config import Settings, get_settings
+ from app.core.cookies import CSRF_COOKIE_NAME
+ from app.core.errors import AppError
+-from app.main import create_app
++from app.main import DocumentUploadSizeLimitMiddleware, create_app
+ from app.models.accounting import Document, Invoice
+ from app.models.review import AuditEvent
+ from app.schemas.documents import DocumentDto, DocumentUploadResponse
+ from app.services.document_service import (
++    _clean_optional_text,
+     build_content_disposition,
+     get_clean_document_stream,
++    upload_workspace_document,
+ )
+ from app.services.storage_service import (
+     MAX_DOCUMENT_BYTES,
++    MAX_DOCUMENT_UPLOAD_REQUEST_BYTES,
++    MAX_MULTIPART_OVERHEAD_BYTES,
+     STREAM_CHUNK_SIZE,
+     LocalFilesystemStorage,
+     build_workspace_document_storage_key,
+@@ -144,11 +150,12 @@ def test_filename_sanitization_and_content_disposition_safety() -> None:
+     assert bounded.endswith(".pdf")
+ 
+     assert sanitize_original_filename("...", fallback_ext=".pdf") == "document.pdf"
++    assert sanitize_original_filename('vendor\r\n"report".pdf') == "vendor_report_.pdf"
+     assert (
+         build_content_disposition(
+             original_filename='vendor\r\n"report".pdf', download=False
+         )
+-        == 'inline; filename="vendor _report_.pdf"'
++        == 'inline; filename="vendor_report_.pdf"'
+     )
+     assert (
+         build_content_disposition(original_filename="invoice.pdf", download=True)
+@@ -420,6 +427,201 @@ def test_get_clean_document_stream_blocks_all_non_clean_statuses(
+     assert b"".join(stream) == payload
+ 
+ 
++def test_clean_optional_text_and_upload_reject_nul_bytes_before_storage(
++    tmp_path: Path,
++) -> None:
++    assert _clean_optional_text(None, max_len=240) is None
++    assert _clean_optional_text("   \t\n  ", max_len=240) is None
++    assert (
++        _clean_optional_text("  Acme   Enterprises \n Pvt Ltd ", max_len=240)
++        == "Acme Enterprises Pvt Ltd"
++    )
++    assert len(_clean_optional_text("A" * 300, max_len=240) or "") == 240
++
++    for bad_val in ("Acme\x00Corp", "   \x00   ", "INV-01\x00"):
++        with pytest.raises(AppError) as nul_exc:
++            _clean_optional_text(bad_val, max_len=240, field_label="supplierName")
++        assert nul_exc.value.status_code == 422
++        assert nul_exc.value.code == "VALIDATION_ERROR"
++
++    storage_root = tmp_path / "nul_guard_storage"
++    storage = LocalFilesystemStorage(storage_root)
++    dummy_ws = SimpleNamespace(
++        id=uuid.uuid4(),
++        organization_id=uuid.uuid4(),
++        name="Workspace",
++    )
++    dummy_actor = SimpleNamespace(id=uuid.uuid4(), full_name="Uploader")
++
++    class _NoDbSession:
++        def add(self, _obj: object) -> None:
++            raise AssertionError("DB should not be touched on NUL validation error")
++
++    for kwargs in (
++        {"supplier_name": "Acme\x00Supplies"},
++        {"invoice_number": "INV\x002026"},
++        {"supplier_name": "Acme\x00Supplies", "create_draft_invoice": False},
++    ):
++        with pytest.raises(AppError) as up_exc:
++            upload_workspace_document(
++                _NoDbSession(),  # type: ignore[arg-type]
++                storage=storage,
++                workspace=dummy_ws,  # type: ignore[arg-type]
++                actor=dummy_actor,  # type: ignore[arg-type]
++                raw_filename="invoice.pdf",
++                declared_content_type="application/pdf",
++                file_stream=io.BytesIO(_pdf_bytes()),
++                **kwargs,  # type: ignore[arg-type]
++            )
++        assert up_exc.value.status_code == 422
++        assert up_exc.value.code == "VALIDATION_ERROR"
++        assert list(storage_root.rglob("*")) == []
++
++
++def test_asgi_upload_size_limit_middleware_pre_multipart_and_chunked_streaming() -> None:
++    assert MAX_DOCUMENT_UPLOAD_REQUEST_BYTES == (
++        MAX_DOCUMENT_BYTES + MAX_MULTIPART_OVERHEAD_BYTES
++    )
++
++    ws_id = uuid.uuid4()
++    upload_path = f"/api/v1/workspaces/{ws_id}/documents"
++
++    async def _run() -> None:
++        inner_calls = 0
++
++        async def _inner_app(scope: object, receive: object, send: object) -> None:
++            nonlocal inner_calls
++            inner_calls += 1
++            while True:
++                msg = await receive()  # type: ignore[misc]
++                if msg["type"] == "http.request" and not msg.get("more_body", False):
++                    break
++            await send(  # type: ignore[misc]
++                {
++                    "type": "http.response.start",
++                    "status": 200,
++                    "headers": [(b"content-type", b"application/json")],
++                }
++            )
++            await send(  # type: ignore[misc]
++                {"type": "http.response.body", "body": b'{"ok":true}', "more_body": False}
++            )
++
++        middleware = DocumentUploadSizeLimitMiddleware(
++            _inner_app,
++            api_v1_prefix="/api/v1",
++            max_request_bytes=1024,
++        )
++
++        # 1. Oversized Content-Length rejected before inner app or receive() is ever called
++        sent_cl: list[dict[str, object]] = []
++        cl_reads = 0
++
++        async def _cl_receive() -> dict[str, object]:
++            nonlocal cl_reads
++            cl_reads += 1
++            return {"type": "http.request", "body": b"ignored", "more_body": False}
++
++        async def _cl_send(msg: dict[str, object]) -> None:
++            sent_cl.append(msg)
++
++        await middleware(
++            {
++                "type": "http",
++                "method": "POST",
++                "path": upload_path,
++                "headers": [(b"content-length", b"1025")],
++                "state": {"request_id": "req_cl_test"},
++            },
++            _cl_receive,
++            _cl_send,  # type: ignore[arg-type]
++        )
++        assert inner_calls == 0
++        assert cl_reads == 0
++        starts = [m for m in sent_cl if m["type"] == "http.response.start"]
++        bodies = [m for m in sent_cl if m["type"] == "http.response.body"]
++        assert len(starts) == 1
++        assert starts[0]["status"] == 413
++        assert len(bodies) == 1
++        err_payload = json.loads(bodies[0]["body"].decode("utf-8"))  # type: ignore[union-attr]
++        assert err_payload["error"]["code"] == "FILE_TOO_LARGE"
++        assert err_payload["error"]["requestId"] == "req_cl_test"
++
++        # 2. Streamed request without Content-Length exceeding limit aborts early with 1 response
++        sent_stream: list[dict[str, object]] = []
++        chunks = [b"x" * 512, b"y" * 600, b"z" * 4096]
++        chunk_idx = 0
++
++        async def _stream_receive() -> dict[str, object]:
++            nonlocal chunk_idx
++            if chunk_idx >= len(chunks):
++                return {"type": "http.request", "body": b"", "more_body": False}
++            data = chunks[chunk_idx]
++            chunk_idx += 1
++            return {
++                "type": "http.request",
++                "body": data,
++                "more_body": chunk_idx < len(chunks),
++            }
++
++        async def _stream_send(msg: dict[str, object]) -> None:
++            sent_stream.append(msg)
++
++        await middleware(
++            {
++                "type": "http",
++                "method": "POST",
++                "path": upload_path,
++                "headers": [],
++                "state": {"request_id": "req_stream_test"},
++            },
++            _stream_receive,
++            _stream_send,  # type: ignore[arg-type]
++        )
++        # Aborted on chunk 2 (1112 > 1024), never pulled chunk 3
++        assert chunk_idx == 2
++        stream_starts = [m for m in sent_stream if m["type"] == "http.response.start"]
++        stream_bodies = [m for m in sent_stream if m["type"] == "http.response.body"]
++        assert len(stream_starts) == 1
++        assert stream_starts[0]["status"] == 413
++        assert len(stream_bodies) == 1
++        stream_err = json.loads(stream_bodies[0]["body"].decode("utf-8"))  # type: ignore[union-attr]
++        assert stream_err["error"]["code"] == "FILE_TOO_LARGE"
++        assert stream_err["error"]["requestId"] == "req_stream_test"
++
++        # 3. Other routes bypass limit completely even with larger body / Content-Length
++        sent_other: list[dict[str, object]] = []
++        other_chunks = [b"a" * 2048]
++        other_idx = 0
++
++        async def _other_receive() -> dict[str, object]:
++            nonlocal other_idx
++            if other_idx >= len(other_chunks):
++                return {"type": "http.request", "body": b"", "more_body": False}
++            data = other_chunks[other_idx]
++            other_idx += 1
++            return {"type": "http.request", "body": data, "more_body": False}
++
++        async def _other_send(msg: dict[str, object]) -> None:
++            sent_other.append(msg)
++
++        await middleware(
++            {
++                "type": "http",
++                "method": "POST",
++                "path": f"/api/v1/workspaces/{ws_id}/suppliers",
++                "headers": [(b"content-length", b"2048")],
++                "state": {},
++            },
++            _other_receive,
++            _other_send,  # type: ignore[arg-type]
++        )
++        assert inner_calls == 2
++        assert sent_other[0]["status"] == 200
++
++    asyncio.run(_run())
++
++
+ # ---------------------------------------------------------------------------
+ # PostgreSQL 16 integration fixtures
+ # ---------------------------------------------------------------------------
+@@ -802,6 +1004,149 @@ def test_document_upload_rejects_spoofed_magic_oversize_and_empty_with_no_disk_l
+         == []
+     )
+ 
++    # 5. Embedded NUL bytes in supplierName or invoiceNumber -> 422 VALIDATION_ERROR cleanly
++    for bad_field, bad_val in (
++        ("supplierName", "Acme\x00Holdings"),
++        ("invoiceNumber", "INV-\x00999"),
++    ):
++        nul_resp = client.post(
++            f"/api/v1/workspaces/{ws_id}/documents",
++            headers=_csrf_headers(client),
++            files={"file": ("valid.pdf", _pdf_bytes(512), "application/pdf")},
++            data={bad_field: bad_val},
++        )
++        assert nul_resp.status_code == 422, nul_resp.text
++        assert nul_resp.json()["error"]["code"] == "VALIDATION_ERROR"
++
++    assert [p for p in storage_root.rglob("*") if p.is_file()] == []
++
++
++def test_document_upload_asgi_request_body_limit_before_multipart_parsing(
++    make_client: Callable[..., TestClient],
++    pg_settings: Settings,
++    storage_root: Path,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    client = make_client()
++    uid = uuid.uuid4().hex[:8]
++    reg = _register_user(client, prefix="doc_asgi", org_name=f"ASGI Firm {uid}")
++    ws_id = reg["workspace"]["workspaceId"]
++
++    parser_invoked = False
++
++    def _fail_if_reached(*_args: object, **_kwargs: object) -> object:
++        nonlocal parser_invoked
++        parser_invoked = True
++        raise AssertionError("Multipart upload handler should not run on oversized request")
++
++    monkeypatch.setattr(
++        "app.api.v1.documents.upload_workspace_document",
++        _fail_if_reached,
++    )
++
++    # 1. Oversized Content-Length rejected at ASGI layer before multipart parsing, preserving CORS & requestId
++    csrf_headers = _csrf_headers(client, origin="http://localhost:3000")
++    oversized_cl_resp = client.post(
++        f"/api/v1/workspaces/{ws_id}/documents",
++        headers={
++            **csrf_headers,
++            "Content-Type": "multipart/form-data; boundary=----boundary",
++            "Content-Length": str(MAX_DOCUMENT_UPLOAD_REQUEST_BYTES + 1),
++        },
++        content=b"small",
++    )
++    assert oversized_cl_resp.status_code == 413
++    assert oversized_cl_resp.json()["error"]["code"] == "FILE_TOO_LARGE"
++    assert oversized_cl_resp.json()["error"]["requestId"].startswith("req_")
++    assert oversized_cl_resp.headers.get("x-request-id") == oversized_cl_resp.json()["error"]["requestId"]
++    assert oversized_cl_resp.headers.get("access-control-allow-origin") == "http://localhost:3000"
++    assert parser_invoked is False
++
++    # 2. Streamed request without Content-Length exceeding 16 MiB against real create_app ASGI app
++    app = create_app(pg_settings)
++    chunk_size = 512 * 1024  # 512 KiB
++    total_chunks = (MAX_DOCUMENT_UPLOAD_REQUEST_BYTES // chunk_size) + 4
++    sent_messages: list[dict[str, object]] = []
++    chunks_pulled = 0
++    cookie_header = "; ".join(f"{k}={v}" for k, v in client.cookies.items()).encode("ascii")
++    csrf_token_val = (client.cookies.get(CSRF_COOKIE_NAME) or "").encode("ascii")
++
++    async def _run_chunked_asgi() -> None:
++        async def _receive() -> dict[str, object]:
++            nonlocal chunks_pulled
++            if chunks_pulled >= total_chunks:
++                return {"type": "http.request", "body": b"", "more_body": False}
++            chunks_pulled += 1
++            prefix = (
++                b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"x.pdf\"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.7\n"
++                if chunks_pulled == 1
++                else b"0" * chunk_size
++            )
++            body = prefix.ljust(chunk_size, b"0")[:chunk_size]
++            return {
++                "type": "http.request",
++                "body": body,
++                "more_body": chunks_pulled < total_chunks,
++            }
++
++        async def _send(msg: dict[str, object]) -> None:
++            sent_messages.append(msg)
++
++        await app(
++            {
++                "type": "http",
++                "asgi": {"version": "3.0"},
++                "http_version": "1.1",
++                "method": "POST",
++                "scheme": "http",
++                "path": f"/api/v1/workspaces/{ws_id}/documents",
++                "raw_path": f"/api/v1/workspaces/{ws_id}/documents".encode("ascii"),
++                "query_string": b"",
++                "headers": [
++                    (b"host", b"testserver"),
++                    (b"content-type", b"multipart/form-data; boundary=b"),
++                    (b"origin", b"http://localhost:3000"),
++                    (b"cookie", cookie_header),
++                    (b"x-csrf-token", csrf_token_val),
++                ],
++                "client": ("127.0.0.1", 50000),
++                "server": ("testserver", 80),
++            },
++            _receive,
++            _send,  # type: ignore[arg-type]
++        )
++
++    try:
++        asyncio.run(_run_chunked_asgi())
++    finally:
++        app.state.engine.dispose()
++    starts = [m for m in sent_messages if m["type"] == "http.response.start"]
++    bodies = [m for m in sent_messages if m["type"] == "http.response.body"]
++    assert len(starts) == 1
++    assert starts[0]["status"] == 413
++    assert len(bodies) == 1
++    err_json = json.loads(bodies[0]["body"].decode("utf-8"))  # type: ignore[union-attr]
++    assert err_json["error"]["code"] == "FILE_TOO_LARGE"
++    assert chunks_pulled < total_chunks
++    assert parser_invoked is False
++
++    # 3. Normal upload & other routes still function normally once monkeypatch is restored
++    monkeypatch.undo()
++    ok_resp = client.post(
++        f"/api/v1/workspaces/{ws_id}/documents",
++        headers=_csrf_headers(client),
++        files={"file": ("within_limit.pdf", _pdf_bytes(4096), "application/pdf")},
++        data={"supplierName": "Valid   Supplier ", "invoiceNumber": " INV-001 "},
++    )
++    assert ok_resp.status_code == 201, ok_resp.text
++
++    supplier_resp = client.post(
++        f"/api/v1/workspaces/{ws_id}/suppliers",
++        headers=_csrf_headers(client),
++        json={"name": "Unaffected Supplier Route"},
++    )
++    assert supplier_resp.status_code == 201, supplier_resp.text
++
+ 
+ def test_document_db_failure_triggers_storage_cleanup_and_rollback(
+     make_client: Callable[..., TestClient],
+@@ -970,7 +1315,17 @@ def test_document_scan_gating_safe_streaming_headers_rbac_csrf_and_isolation(
+     assert skipped_content.status_code == 409
+     assert skipped_content.json()["error"]["code"] == "DOCUMENT_SCAN_NOT_CLEAN"
+ 
+-    # 3. INFECTED blocked (403 DOCUMENT_INFECTED)
++    # 3. FAILED blocked (409 DOCUMENT_SCAN_NOT_CLEAN) — verifies PostgreSQL CHECK constraint too
++    db_doc.scan_status = "FAILED"
++    db_session.commit()
++
++    failed_content = admin_client.get(
++        f"/api/v1/workspaces/{ws1_id}/documents/{doc_id}/content"
++    )
++    assert failed_content.status_code == 409
++    assert failed_content.json()["error"]["code"] == "DOCUMENT_SCAN_NOT_CLEAN"
++
++    # 4. INFECTED blocked (403 DOCUMENT_INFECTED)
+     db_doc.scan_status = "INFECTED"
+     db_session.commit()
+ 
+@@ -980,7 +1335,7 @@ def test_document_scan_gating_safe_streaming_headers_rbac_csrf_and_isolation(
+     assert infected_content.status_code == 403
+     assert infected_content.json()["error"]["code"] == "DOCUMENT_INFECTED"
+ 
+-    # 4. CLEAN unlocks safe streaming with strict security headers to all active workspace roles
++    # 5. CLEAN unlocks safe streaming with strict security headers to all active workspace roles
+     db_doc.scan_status = "CLEAN"
+     db_session.commit()
+ 
+@@ -993,6 +1348,7 @@ def test_document_scan_gating_safe_streaming_headers_rbac_csrf_and_isolation(
+         assert inline_resp.headers["content-type"] == "application/pdf"
+         assert inline_resp.headers["x-content-type-options"] == "nosniff"
+         assert inline_resp.headers["cache-control"] == "private, no-store"
++        assert inline_resp.headers["content-security-policy"] == "sandbox"
+         assert (
+             inline_resp.headers["content-disposition"]
+             == 'inline; filename="invoice_scan.pdf"'
+@@ -1010,6 +1366,22 @@ def test_document_scan_gating_safe_streaming_headers_rbac_csrf_and_isolation(
+     )
+     assert download_resp.headers["x-content-type-options"] == "nosniff"
+     assert download_resp.headers["cache-control"] == "private, no-store"
++    assert "content-security-policy" not in download_resp.headers
++
++    # Inline PNG image preserves image headers without interfering with attachment behavior
++    png_doc_id = rev_resp.json()["document"]["id"]
++    png_db_doc = db_session.get(Document, uuid.UUID(png_doc_id))
++    assert png_db_doc is not None
++    png_db_doc.scan_status = "CLEAN"
++    db_session.commit()
++    png_inline = viewer_client.get(
++        f"/api/v1/workspaces/{ws1_id}/documents/{png_doc_id}/content"
++    )
++    assert png_inline.status_code == 200
++    assert png_inline.headers["content-type"] == "image/png"
++    assert png_inline.headers["x-content-type-options"] == "nosniff"
++    assert png_inline.headers["cache-control"] == "private, no-store"
++    assert "content-security-policy" not in png_inline.headers
+ 
+     # Cross-workspace isolation (foreign tenant + sibling workspace in same org) -> 404
+     assert (
+diff --git a/backend/tests/test_migrations.py b/backend/tests/test_migrations.py
+index 32a88c9..c038e56 100644
+--- a/backend/tests/test_migrations.py
++++ b/backend/tests/test_migrations.py
+@@ -433,6 +433,62 @@ def test_alembic_upgrade_and_downgrade_on_postgresql(
+                     or "ck_invoices_invoice_discount_mode_valid"
+                     in str(discount_exc.value)
+                 )
++
++                # 6. Documents scan_status allows FAILED and rejects invalid values
++                doc_id = str(uuid.uuid4())
++                with conn.begin_nested():
++                    conn.execute(
++                        text(
++                            "INSERT INTO documents ("
++                            "id, workspace_id, uploaded_by_user_id, original_filename, "
++                            "storage_key, mime_type, byte_size, sha256_checksum, scan_status"
++                            ") VALUES ("
++                            "CAST(:id AS uuid), CAST(:ws_id AS uuid), CAST(:user_id AS uuid), "
++                            ":fname, :skey, 'application/pdf', 128, :sha, 'FAILED'"
++                            ")"
++                        ),
++                        {
++                            "id": doc_id,
++                            "ws_id": ws_id,
++                            "user_id": user_id,
++                            "fname": "scan-failed.pdf",
++                            "skey": f"orgs/{org_id}/workspaces/{ws_id}/{doc_id}.pdf",
++                            "sha": "a" * 64,
++                        },
++                    )
++
++                with pytest.raises(IntegrityError) as doc_scan_exc:
++                    with conn.begin_nested():
++                        bad_doc_id = str(uuid.uuid4())
++                        conn.execute(
++                            text(
++                                "INSERT INTO documents ("
++                                "id, workspace_id, uploaded_by_user_id, original_filename, "
++                                "storage_key, mime_type, byte_size, sha256_checksum, scan_status"
++                                ") VALUES ("
++                                "CAST(:id AS uuid), CAST(:ws_id AS uuid), CAST(:user_id AS uuid), "
++                                ":fname, :skey, 'application/pdf', 128, :sha, 'INVALID_STATUS'"
++                                ")"
++                            ),
++                            {
++                                "id": bad_doc_id,
++                                "ws_id": ws_id,
++                                "user_id": user_id,
++                                "fname": "scan-bad.pdf",
++                                "skey": f"orgs/{org_id}/workspaces/{ws_id}/{bad_doc_id}.pdf",
++                                "sha": "b" * 64,
++                            },
++                        )
++                doc_scan_diag = getattr(
++                    getattr(doc_scan_exc.value.orig, "diag", None),
++                    "constraint_name",
++                    None,
++                )
++                assert (
++                    doc_scan_diag == "ck_documents_document_scan_status_valid"
++                    or "ck_documents_document_scan_status_valid"
++                    in str(doc_scan_exc.value)
++                )
+             finally:
+                 tx.rollback()
+ 
+@@ -557,7 +613,7 @@ def test_alembic_revision_ids_fit_alembic_version_and_linear_chain() -> None:
+     }
+     assert referenced_parents.issubset(revisions.keys())
+     heads = [rev for rev in revisions if rev not in referenced_parents]
+-    assert heads == ["0002_invites_and_rate_limits"]
++    assert heads == ["0003_doc_failed_scan_status"]
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/docs/API_CONTRACT.md b/docs/API_CONTRACT.md
+index d2353c0..fff139d 100644
+--- a/docs/API_CONTRACT.md
++++ b/docs/API_CONTRACT.md
+@@ -258,22 +258,22 @@
+ ## 6. Documents & Invoices Endpoints
+ 
+ ### `POST /api/v1/workspaces/{workspaceId}/documents`
+-- **Purpose:** Stream and validate a PDF/PNG/JPEG/WEBP invoice file (`multipart/form-data`), enforce bounded `<= 64 KB` chunk streaming (`15 MB` / `15,728,640` bytes maximum), verify extension + declared MIME + binary magic-byte signature (`%PDF-`, PNG, JPEG, WEBP), sanitize filename metadata, compute `sha256Checksum`, persist via `DocumentStorage` (`LocalFilesystemStorage` rooted at `DOCUMENT_STORAGE_ROOT` with server-generated UUID storage keys and canonical path containment), persist the `documents` row (`scanStatus = "PENDING"`), optionally stage a linked `PENDING_REVIEW` draft `invoices` row (`createDraftInvoice = true` default), and emit a `document.uploaded` audit event. Database rollback triggers best-effort storage cleanup.
++- **Purpose:** Enforce an ASGI-level `16 MiB` (`16,777,216` bytes: `15 MB` file cap + `1 MiB` multipart overhead) request-body limit before multipart parsing (rejecting both oversized `Content-Length` headers and chunked/unannounced streams exceeding the limit with `413 FILE_TOO_LARGE`), reject embedded NUL (`\x00`) bytes in optional `supplierName`/`invoiceNumber` form fields (`422 VALIDATION_ERROR`), stream and validate a PDF/PNG/JPEG/WEBP invoice file (`multipart/form-data`) in bounded `<= 64 KB` chunks up to `15 MB` (`15,728,640` bytes), verify extension + declared MIME + binary magic-byte signature (`%PDF-`, PNG, JPEG, WEBP), sanitize filename metadata, compute `sha256Checksum`, persist via `DocumentStorage` (`LocalFilesystemStorage` rooted at `DOCUMENT_STORAGE_ROOT` with server-generated UUID storage keys and canonical path containment), persist the `documents` row (`scanStatus = "PENDING"`, with PostgreSQL check constraint permitting `'PENDING' | 'CLEAN' | 'INFECTED' | 'FAILED' | 'SKIPPED_DEV'`), optionally stage a linked `PENDING_REVIEW` draft `invoices` row (`createDraftInvoice = true` default), and emit a `document.uploaded` audit event. Database rollback triggers best-effort storage cleanup.
+ - **Malware Scanning Note:** Automated antivirus daemon integration (e.g., ClamAV / async scan worker) is deferred to a subsequent task. Uploaded documents are recorded as `scanStatus = "PENDING"` and strictly blocked from content streaming until explicitly verified `CLEAN`.
+ - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER` + CSRF (`Origin`/`Referer` + `X-CSRF-Token`).
+ - **Request (`multipart/form-data`):**
+-  - `file`: binary (PDF, PNG, JPEG, or WEBP; max `15,728,640` bytes / 15 MB)
+-  - `supplierName`: optional string (`max_length=240`, used for draft invoice `supplierNameSnapshot`)
+-  - `invoiceNumber`: optional string (`max_length=100`, used for draft invoice `invoiceNumber`)
++  - `file`: binary (PDF, PNG, JPEG, or WEBP; max `15,728,640` bytes / 15 MB within `16,777,216`-byte request limit)
++  - `supplierName`: optional string (`max_length=240`, no NUL characters; used for draft invoice `supplierNameSnapshot`)
++  - `invoiceNumber`: optional string (`max_length=100`, no NUL characters; used for draft invoice `invoiceNumber`)
+   - `createDraftInvoice`: boolean (default `true`)
+ - **Response (`201 Created`):** `{ "document": { "id": "uuid", "workspaceId": "uuid", "uploadedByUserId": "uuid", "originalFilename": "invoice.pdf", "mimeType": "application/pdf", "byteSize": 102400, "sha256Checksum": "64-hex...", "pageCount": 1, "scanStatus": "PENDING", "createdAt": "..." }, "invoiceId": "uuid-or-null" }` *(internal `storageKey` and filesystem paths are never returned)*.
+-- **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 WORKSPACE_NOT_FOUND`, `413 FILE_TOO_LARGE`, `415 UNSUPPORTED_MEDIA_TYPE`, `422 EMPTY_FILE`, `422 VALIDATION_ERROR`.
++- **Errors:** `400 VALIDATION_ERROR`, `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 WORKSPACE_NOT_FOUND`, `413 FILE_TOO_LARGE`, `415 UNSUPPORTED_MEDIA_TYPE`, `422 EMPTY_FILE`, `422 VALIDATION_ERROR`.
+ 
+ ### `GET /api/v1/workspaces/{workspaceId}/documents/{documentId}/content`
+ - **Purpose:** Stream a verified `CLEAN` document safely from `DocumentStorage` to authorized active members of `{workspaceId}`. **Strictly requires `scanStatus == "CLEAN"`** in all environments (`INFECTED` returns `403 DOCUMENT_INFECTED`; `PENDING`, `SKIPPED_DEV`, and `FAILED` return `409 DOCUMENT_SCAN_NOT_CLEAN`).
+ - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`.
+ - **Query Params:** `download=true|false` (default `false`; controls `Content-Disposition: inline|attachment` using sanitized filename metadata).
+-- **Response (`200 OK`):** Bounded `<= 64 KB` binary stream with server-verified `Content-Type`, `Content-Length`, `Content-Disposition`, `X-Content-Type-Options: nosniff`, and `Cache-Control: private, no-store`.
++- **Response (`200 OK`):** Bounded `<= 64 KB` binary stream with server-verified `Content-Type`, `Content-Length`, `Content-Disposition`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store`, and **`Content-Security-Policy: sandbox`** when serving `application/pdf` inline (`download=false`). *Note: CSP sandboxing is defense-in-depth for browser rendering and does not replace antivirus scanning or PDF sanitization.*
+ - **Errors:** `401 UNAUTHENTICATED`, `403 DOCUMENT_INFECTED`, `404 WORKSPACE_NOT_FOUND`, `404 DOCUMENT_NOT_FOUND`, `404 DOCUMENT_CONTENT_NOT_FOUND`, `409 DOCUMENT_SCAN_NOT_CLEAN`.
+ 
+ ### `GET /api/v1/workspaces/{workspaceId}/invoices`
+diff --git a/docs/NEXT_TASK.md b/docs/NEXT_TASK.md
+index 7135bf4..fdf453a 100644
+--- a/docs/NEXT_TASK.md
++++ b/docs/NEXT_TASK.md
+@@ -3,8 +3,8 @@
+ ## Immediate Verification Prerequisite (Run Outside Container Runtime)
+ 
+ Before starting Task 002.5 implementation:
+-1. Inspect and resolve the backend `pytest` failure observed on GitHub Actions **CI #15 (`44790860644`)** for `c0c0b615` (`test_suppliers.py` / Task 002.4A).
+-2. Run the full `pytest` suite including `test_documents.py` (Task 002.4B) on **Python 3.12+ + PostgreSQL 16+** (locally or via GitHub Actions CI):
++1. Synchronize Task 002.4C (`test_documents.py`, migration `0003_doc_failed_scan_status`, ASGI pre-multipart upload size limit, inline PDF `Content-Security-Policy: sandbox`, NUL-byte validation, and docs) onto a feature branch off `fa89175a09404f4a1cedfa9a2a296da2b25c1553`.
++2. Run the full `pytest` suite and Alembic upgrade/downgrade cycle on **Python 3.12+ + PostgreSQL 16+** (locally or via GitHub Actions CI) and confirm green Step 9 CI:
+ 
+ ```bash
+ cd backend
+@@ -21,7 +21,7 @@ pytest -v -ra
+ ## Next Development Milestone: NORUS BILLWISE TASK 002.5 — Invoices CRUD, Flexible Indian GST & Line-Item Reconciliation Engine, and Advisory Duplicate Detection
+ 
+ ### Objective
+-Implement the core invoice lifecycle APIs on top of Task 002.4A (`suppliers`) and Task 002.4B (`documents`), delivering flexible GST & line-item reconciliation, advisory duplicate detection, strict RBAC/CSRF/tenant isolation, and mandatory human-review gating (never auto-verifying invoices).
++Implement the core invoice lifecycle APIs on top of Task 002.4A (`suppliers`) and Task 002.4B/C (`documents`), delivering flexible GST & line-item reconciliation, advisory duplicate detection, strict RBAC/CSRF/tenant isolation, and mandatory human-review gating (never auto-verifying invoices).
+ 
+ ### Deliverables
+ 
+@@ -31,7 +31,7 @@ Implement the core invoice lifecycle APIs on top of Task 002.4A (`suppliers`) an
+ 2. **Advisory Duplicate Warning Engine (`backend/app/services/invoice_service.py`)**
+    - Detect workspace-scoped active (`deleted_at IS NULL`) invoices sharing supplier/normalized invoice number (respecting `WorkspaceSettings.enable_duplicate_warnings`) and populate advisory `duplicateWarning` for human review rather than silent rejection.
+ 3. **Production Malware Scan & Object Storage Worker Hook (Preparation / Follow-on)**
+-   - Add an async scan-transition workflow (e.g., ClamAV worker or presigned S3/MinIO adapter) so validated uploads can progress safely from `PENDING` to `CLEAN` or `INFECTED` before Review Centre streaming.
++   - Implement an S3/MinIO `DocumentStorage` adapter and an async malware scan worker (e.g., ClamAV) so validated `PENDING` uploads can progress safely to `CLEAN`, `INFECTED`, or `FAILED` before production deployment.
+ 4. **PostgreSQL 16 Integration Tests (`backend/tests/test_invoices.py`)**
+    - Cover GST intra/inter-state & `PRE_TAX`/`POST_TAX_COMMERCIAL` discount arithmetic, rounding tolerance, line-item variance advisories, duplicate warnings, `UPLOADER` edit restriction to `PENDING_REVIEW` only, `VERIFIED` lock (`409 VERIFIED_INVOICE_LOCKED`), soft-deleted invoice exclusion, CSRF, and cross-workspace `404` isolation.
+ 
+diff --git a/docs/STATUS.md b/docs/STATUS.md
+index 60a4cd2..d4f6dd0 100644
+--- a/docs/STATUS.md
++++ b/docs/STATUS.md
+@@ -1,38 +1,37 @@
+ # STATUS — Project Progress
+ 
+-**Current Milestone:** Task 002.4B — Document Storage & Upload/Streaming API  
+-**Status:** Task 002.4B Code & Tests Implemented Locally (on top of GitHub `main` commit `c0c0b6157d384dc63ed8e51d3fbb6f3ef14eddc8`, whose CI #15 run `44790860644` passed frontend checks and failed backend pytest Step 9; `pytest`, Alembic, and PostgreSQL 16 execution pending external Python 3.12+ / GitHub Actions CI run)
++**Current Milestone:** Task 002.4C — CI Stabilization & Document Upload Hardening  
++**Status:** Task 002.4C Changes Implemented Locally (on top of verified GitHub `main` commit `fa89175a09404f4a1cedfa9a2a296da2b25c1553`, whose CI #17 run `44800309064` passed Frontend CI and failed Backend Step 9; `pytest`, Alembic, and PostgreSQL 16 execution of Task 002.4C pending external Python 3.12+ / GitHub Actions CI run)
+ 
+ ---
+ 
+-## Completed Work in Task 002.4B — Document Storage & Upload/Streaming API
+-
+-1. **Dependencies & Config Validation (`backend/requirements.txt`, `backend/pyproject.toml`, `backend/app/core/config.py`)**
+-   - Pinned `python-multipart==0.0.20` for FastAPI `UploadFile` / `Form(...)` multipart parsing while keeping existing pins (`httpx==0.27.2`, `pydantic-settings==2.7.0`, etc.) untouched.
+-   - Validated non-blank `document_storage_root` in `Settings`.
+-2. **Pluggable `DocumentStorage` & `LocalFilesystemStorage` (`backend/app/services/storage_service.py`)**
+-   - Defined `DocumentStorage` Protocol (`save_stream`, `open_stream`, `delete`) for future S3/MinIO adapters.
+-   - Implemented `LocalFilesystemStorage` rooted at `settings.document_storage_root` with server-only UUID storage keys (`orgs/{org_id}/workspaces/{ws_id}/{document_id}.{ext}`), `Path.resolve()` canonical root containment (blocking `..`, backslashes, drive prefixes, null bytes, and symlink escapes), bounded `<= 64 KB` (`65,536` byte) chunked upload/download streaming, incremental `SHA-256` computation, atomic temp-file staging with `.part`/error cleanup, strict `15 MB` (`15,728,640` bytes) cap (`413 FILE_TOO_LARGE`), `0`-byte rejection (`422 EMPTY_FILE`), extension + declared MIME + binary magic-byte inspection (`%PDF-`, PNG, JPEG, WEBP -> `415 UNSUPPORTED_MEDIA_TYPE`), and strict ASCII single-component `sanitize_original_filename`.
+-3. **Document Domain Service, Schemas & Router (`backend/app/schemas/documents.py`, `backend/app/services/document_service.py`, `backend/app/api/v1/documents.py`, `backend/app/api/v1/__init__.py`)**
+-   - Implemented `POST /api/v1/workspaces/{workspaceId}/documents` (`WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER` + `require_csrf`): stores verified stream, creates `Document` (`scanStatus = "PENDING"`, never exposing `storageKey`), optionally creates a staged `PENDING_REVIEW` draft `Invoice` (`createDraftInvoice = true` default, populated with `WorkspaceSettings` buyer defaults and composite `(workspace_id, document_id)` FK), emits `document.uploaded` audit event, and rolls back DB + removes written storage file on DB failure.
+-   - Implemented `GET /api/v1/workspaces/{workspaceId}/documents/{documentId}/content` (`WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`): enforces `workspace_id` isolation (`404` across workspaces), **blocks all non-`CLEAN` scan statuses** (`INFECTED` -> `403 DOCUMENT_INFECTED`; `PENDING`, `SKIPPED_DEV`, `FAILED` -> `409 DOCUMENT_SCAN_NOT_CLEAN`), and streams exact bytes with `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store`, `Content-Disposition: inline|attachment`, `Content-Length`, and server-verified `Content-Type`.
+-   - **Malware Scanning & Storage Boundary:** No live antivirus daemon (e.g., ClamAV) is integrated in Task 002.4B. New uploads stay `PENDING` and remain blocked from `/content` in all environments until explicitly marked `CLEAN`. Local filesystem storage is intended for single-node dev/testing; production deployments require S3/MinIO + async malware scanning worker.
+-4. **Documents Unit & PostgreSQL 16 Tests (`backend/tests/test_documents.py`)**
+-   - Added offline unit tests (blank `document_storage_root`, filename/header sanitization, `storageKey` omission, extension/MIME/magic-byte spoofing, path-traversal/symlink escape rejection, bounded `<= 64 KB` chunk tracking, `15 MB` boundary & `15 MB + 1` cleanup, `PENDING`/`SKIPPED_DEV`/`FAILED`/`INFECTED`/`CLEAN` gating) plus PostgreSQL 16 integration tests (PDF/PNG/JPEG/WEBP uploads, draft invoice & audit event creation, spoofed/empty/>15 MB rejections with zero disk leftovers, DB-failure storage rollback cleanup, RBAC, CSRF, cross-workspace `404` isolation, and safe streaming headers).
++## Completed Work in Task 002.4C — CI Stabilization & Document Upload Hardening
++
++1. **Filename Sanitization Test Repair (`backend/tests/test_documents.py`)**
++   - Corrected the unit test assertion for `sanitize_original_filename('vendor\r\n"report".pdf')` / `build_content_disposition(...)` from `'inline; filename="vendor _report_.pdf"'` to `'inline; filename="vendor_report_.pdf"'`, matching `_CONTROL_CHARS_RE` + `_SAFE_FILENAME_CHARS_RE` behavior without weakening filename sanitization.
++2. **PostgreSQL `FAILED` Scan Status Alignment (`backend/app/models/accounting.py`, `backend/alembic/versions/0003_document_failed_scan_status.py`, `backend/tests/test_migrations.py`)**
++   - Updated `Document` model constraint `ck_documents_document_scan_status_valid` and added forward Alembic migration `0003_doc_failed_scan_status` (revising `0002_invites_and_rate_limits`) so `documents.scan_status` permits `'PENDING'`, `'CLEAN'`, `'INFECTED'`, `'FAILED'`, and `'SKIPPED_DEV'` (with downgrade restoring the prior constraint and PostgreSQL migration constraint tests added).
++3. **Pre-Multipart ASGI Upload Size Enforcement (`backend/app/services/storage_service.py`, `backend/app/main.py`)**
++   - Added pure ASGI `DocumentUploadSizeLimitMiddleware` (alongside pure ASGI `RequestIdMiddleware`) scoped strictly to `POST /api/v1/workspaces/{workspaceId}/documents`, enforcing `MAX_DOCUMENT_UPLOAD_REQUEST_BYTES = 16 MiB` (`15 MB` file limit + `1 MiB` explicit multipart overhead) **before** Starlette multipart parsing/spooling.
++   - Rejects oversized `Content-Length` headers immediately without invoking inner handlers and counts streamed request chunks for unannounced/chunked bodies, returning a single standard `413 FILE_TOO_LARGE` error envelope while leaving auth, CSRF, CORS, and all other routes intact.
++4. **Inline PDF Response Hardening & NUL-Byte Validation (`backend/app/api/v1/documents.py`, `backend/app/services/document_service.py`)**
++   - Added `Content-Security-Policy: sandbox` on inline `application/pdf` streaming responses (`download=false`) while keeping `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store`, `CLEAN`-only gating, and unchanged `download=true` attachment behavior. *(CSP sandboxing provides browser defense-in-depth only and does not replace antivirus scanning or PDF sanitization.)*
++   - Updated `_clean_optional_text()` and `upload_workspace_document()` to reject embedded `\x00` NUL bytes in `supplierName` and `invoiceNumber` with `422 VALIDATION_ERROR` before touching storage or PostgreSQL.
+ 
+ ---
+ 
+-## Prior Completed & Audited Work
++## Prior Completed Work on `main` (`fa89175a`)
+ 
+-- **Task 002.4A — Suppliers Master API (`c0c0b6157d384dc63ed8e51d3fbb6f3ef14eddc8` on `main`):** Suppliers schemas, service (`LIKE` escaping, SQL aggregates excluding soft-deleted invoices, `FOR UPDATE` + `IntegrityError` handling), router, and `test_suppliers.py`. **Note:** GitHub Actions CI #15 (`44790860644`) on `c0c0b615` passed Frontend CI and failed Step 9 (`pytest -v -ra`, exit code 1; raw job logs require GitHub auth). Live PostgreSQL 16 debugging/verification on CI #15 is still needed.
+-- **Task 002.3 CI Recovery & Auth/Tenancy (`125857a` / `a873fcb`):** Verified GitHub Actions **CI #13 (`44326415648`)** and **CI #14 (`44376162876`) PASS** across Frontend (`Node 22`) and Backend (`Python 3.12` + `PostgreSQL 16`, `62` `pytest` tests).
++- **Task 002.4A (`c0c0b615` + `fa89175a`):** Suppliers Master API (`GET`/`POST`/`PATCH` `/suppliers`, normalized name/GSTIN/PAN whitespace-before-length validation, `FOR UPDATE` + `IntegrityError` handling, SQL invoice aggregates, RBAC, CSRF, audit events).
++- **Task 002.4B (`e255af40`):** Pluggable `DocumentStorage` + `LocalFilesystemStorage` (UUID keys, canonical path & symlink containment, 15 MB streaming cap, magic-byte validation, draft invoice staging, `CLEAN`-only content streaming).
++- **Task 002.3 (`125857a` / `a873fcb`):** Auth/session/CSRF/RBAC foundation verified green on GitHub Actions CI #13 and CI #14.
+ - **Task 001 – 002.2B:** React 19 + TypeScript + Tailwind CSS v4 frontend SPA and FastAPI modular monolith foundation.
+ 
+ ---
+ 
+-## Implemented vs. Deferred Breakdown
++## Implemented vs. Deferred & Production-Readiness Boundary
+ 
+-- **Implemented & Locally Verified (`src/` + frontend tooling):** React 19 SPA with `npm run lint`, `npm test` (`11 passed`), and `npm run build` passing.
+-- **Implemented in `/backend` (Static Bytecode Compilation Verified Here; `pytest`/PostgreSQL 16 `NOT RUN` Locally):** Tasks 002.2, 002.3, Task 002.4A Suppliers Master API, and Task 002.4B Document Storage & Upload/Streaming API (`storage_service.py`, `document_service.py`, `schemas/documents.py`, `api/v1/documents.py`, `tests/test_documents.py`).
+-- **Container Environment Verification Boundary:** Local AI Studio container runs Python `3.11.2` without `pip`, `pytest`, `alembic`, FastAPI runtime deps, or PostgreSQL 16; live `pytest` execution of `test_suppliers.py` and `test_documents.py` requires running on Python 3.12+ + PostgreSQL 16+ or via GitHub Actions CI.
+-- **Not Yet Implemented (Task 002.5+):** Async antivirus scanner (ClamAV) & production S3/MinIO adapter, Invoices CRUD + GST/line-item reconciliation + duplicate warnings, Human Review endpoints (`/verify`, `/flag`, `/reopen`), Reporting CSV export, Frontend `WorkspaceContext` API wiring, and Task 003+ OCR/AI extraction.
++- **Implemented & Locally Verified:** Python bytecode compilation (`python3 -m compileall -q backend/app backend/alembic backend/tests` -> exit `0`) and React frontend (`npm run lint`, `npm test`, `npm run build`).
++- **Pending Live PostgreSQL 16 / Pytest Verification (`NOT RUN` in Container):** AI Studio container lacks `pytest`, FastAPI runtime deps, and PostgreSQL 16 (`python3 -m pytest` unavailable); full backend suite and Alembic `0003` migration tests must run on Python 3.12+ + PostgreSQL 16+ or via GitHub Actions CI.
++- **Not Production-Ready:** Local `./var/documents` filesystem storage and absence of an antivirus engine (uploads remain `PENDING` and blocked from streaming) are intended for development/single-node testing only. Production deployment still requires object storage (`S3`/`MinIO`), asynchronous malware scanning (`ClamAV`/worker), per-workspace quotas/rate limits, orphan-blob reconciliation, and proxy edge body caps.
++- **Deferred Milestones (Task 002.5+):** Invoices CRUD + GST/line-item reconciliation + duplicate warnings, Human Review endpoints (`/verify`, `/flag`, `/reopen`), Reporting CSV export, Frontend `WorkspaceContext` API wiring, and OCR/AI extraction workers.
+diff --git a/docs/TESTING.md b/docs/TESTING.md
+index 08042cd..a39373b 100644
+--- a/docs/TESTING.md
++++ b/docs/TESTING.md
+@@ -48,11 +48,11 @@ pytest -v -ra
+ - `test_security.py`: Argon2id hashing/verification (`m=65536,t=3,p=4`), dummy password check, SHA-256 refresh token digest uniqueness, constant-time CSRF comparison, HS256 JWT claim verification (`sub`, `sid`, `org_id`, `jti`, `iss`, `aud`), expired/tampered/wrong-type rejection, `Origin`/`Referer` staging/production guards, `get_client_ip` trusted-proxy right-to-left validation vs. spoofing rejection, `extra="forbid"`, whitespace password padding (`< 12` non-whitespace chars), GSTIN/PAN/currency/rounding-tolerance/explicit-`null` validation, audit IP 64-char truncation, and sanitized `500 INTERNAL_ERROR` envelope.
+ - `test_auth_and_tenancy.py` (PostgreSQL 16): Registration + duplicate email (`409`) + concurrent registration race (`[201, 409]`), login (`200`/`401`/`403`) + org-scoped `auth.login` (`workspace_id=None`), `HttpOnly`/`SameSite=Lax`/`Path`/`Secure` cookie flags + non-shadowed `/api/v1` vs `/api/v1/auth` cookie-path scoping + `Max-Age=0` clearing, zero token JSON leakage, `Origin`/`Referer` & CSRF enforcement, expired/tampered JWT cookie rejection, refresh token rotation + token-family replay revocation + `ThreadPoolExecutor` concurrent refresh race, `logout` & `logout-all`, organization/workspace provisioning, anti-enumeration workspace membership rejection (`404 ORGANIZATION_MEMBER_NOT_FOUND`), organization invitation issuance/list (`{ "items": [...] }`)/acceptance/revocation/expiry, concurrent invitation accept & invite-recreation races, org membership suspension/removal revoking workspace access + anti-orphan sole `WORKSPACE_ADMIN` guard (`409 CANNOT_ORPHAN_WORKSPACE_ADMIN`), `is_active=False` `404` hiding, all 4 workspace roles, `ThreadPoolExecutor` dual-admin `FOR UPDATE` & duplicate workspace membership concurrency without deadlocks, last-admin/last-owner `409` protection, cross-IP account-lockout DoS defense + trusted/untrusted proxy integration, rate-limiter DB failure fail-closed `500` check, explicit `null` settings `422`, transaction rollback atomicity, integration URL guard checks, and `requireHumanReview = true` immutability.
+ - `test_suppliers.py` (Offline Schema Unit Tests + PostgreSQL 16 Integration & Concurrency): Supplier name cleaning & `normalized_name` derivation, GSTIN/PAN/stateCode/email/status validation, `extra="forbid"` immutable-field rejection (`id`, `workspaceId`, `normalizedName`), explicit `null` `PATCH` rejection on non-nullable fields, 2-decimal string serialization of `totalValue`, CRUD lifecycle, search (with `%`/`_` LIKE escaping) & pagination, `status` filter (`422` on unknown status), duplicate normalized-name (`409 SUPPLIER_NAME_EXISTS`) & GSTIN (`409 SUPPLIER_GSTIN_EXISTS`) enforcement (while allowing multiple `NULL` GSTINs and identical names/GSTINs in distinct workspaces), foreign-workspace `404` isolation, RBAC (`WORKSPACE_ADMIN` & `REVIEWER` write vs. `UPLOADER` & `VIEWER` read-only `403`), CSRF enforcement, `audit_events` emission, SQL aggregate accuracy & exclusion of soft-deleted invoices (`deleted_at IS NOT NULL`) + SQL query-count N+1 assertion, and `ThreadPoolExecutor` concurrent duplicate-name and duplicate-GSTIN creation races.
+-- `test_documents.py` (Offline Unit Tests + PostgreSQL 16 Integration): Blank `document_storage_root` guard, filename/header sanitization (`\r`/`\n`/quotes/traversal/`>255` chars), `storageKey` omission from DTOs, PDF/PNG/JPEG/WEBP extension + MIME + magic-byte signature validation (`415 UNSUPPORTED_MEDIA_TYPE`), path-traversal & symlink containment rejection, bounded `<= 64 KB` chunk streaming verification, `15 MB` boundary vs. `15 MB + 1` early abort (`413 FILE_TOO_LARGE`) & empty file (`422 EMPTY_FILE`) with zero `.part`/target leftovers, optional draft `PENDING_REVIEW` invoice creation (`createDraftInvoice=true|false`), `document.uploaded` audit emission, DB-failure storage cleanup rollback, RBAC (`WORKSPACE_ADMIN`/`REVIEWER`/`UPLOADER` upload vs. `VIEWER` `403`; all 4 active roles on `CLEAN` download), CSRF enforcement, cross-workspace & intra-org `404` isolation, strict `CLEAN`-only gating (`PENDING`/`SKIPPED_DEV`/`FAILED` -> `409`, `INFECTED` -> `403`, missing disk blob -> `404` without path leakage), and `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store`, `Content-Disposition: inline|attachment` headers.
++- `test_documents.py` (Offline Unit Tests + PostgreSQL 16 Integration): Blank `document_storage_root` guard, filename/header sanitization (`\r`/`\n`/quotes/traversal/`>255` chars including `'inline; filename="vendor_report_.pdf"'`), `storageKey` omission from DTOs, PDF/PNG/JPEG/WEBP extension + MIME + magic-byte signature validation (`415 UNSUPPORTED_MEDIA_TYPE`), path-traversal & symlink containment rejection, bounded `<= 64 KB` chunk streaming verification, `15 MB` boundary vs. `15 MB + 1` early abort (`413 FILE_TOO_LARGE`), `DocumentUploadSizeLimitMiddleware` pre-multipart `16 MiB` limit (`Content-Length` and unannounced streamed chunks returning single `413 FILE_TOO_LARGE` without affecting other routes), empty file (`422 EMPTY_FILE`), `\x00` NUL-byte rejection on `supplierName`/`invoiceNumber` (`422 VALIDATION_ERROR`), optional draft `PENDING_REVIEW` invoice creation (`createDraftInvoice=true|false`), `document.uploaded` audit emission, DB-failure storage cleanup rollback, RBAC (`WORKSPACE_ADMIN`/`REVIEWER`/`UPLOADER` upload vs. `VIEWER` `403`; all 4 active roles on `CLEAN` download), CSRF enforcement, cross-workspace & intra-org `404` isolation, strict `CLEAN`-only gating (`PENDING`/`SKIPPED_DEV`/`FAILED` -> `409` including PostgreSQL persistence of `FAILED`, `INFECTED` -> `403`, missing disk blob -> `404` without path leakage), `Content-Security-Policy: sandbox` on inline PDFs (`download=false`), and preserved attachment/image headers.
+ - `test_migrations.py` (PostgreSQL 16 + Pre-Connection Safety Guards):
+   - Rejects non-PostgreSQL URLs, non-`norus_billwise_test` database names, unapproved remote hosts, and missing `NORUS_ALLOW_DESTRUCTIVE_MIGRATION_TEST=1` **before** calling `create_engine` or Alembic.
+-  - Verifies `0001_initial_foundation` -> `0002_invites_and_rate_limits` revision IDs fit `alembic_version` `VARCHAR(32)` in a single linear chain, verifies both migrations wrap all check constraints in `op.f(...)` matching `Base.metadata.tables`, and executes live PostgreSQL `upgrade -> constraint inspection & enforcement -> downgrade base -> upgrade head`.
+-- **Container & Remote CI Verification Note:** GitHub Actions **CI #14 (`44376162876`)** passed on `a873fcb`; **CI #15 (`44790860644`)** on `c0c0b615` passed Frontend CI (`Node 22`) and failed Step 9 (`pytest -v -ra` on `Python 3.12` + `PostgreSQL 16`, raw logs inaccessible anonymously). Tasks 002.4A (`test_suppliers.py`) and 002.4B (`test_documents.py`) have been statically bytecode-compiled (`python3 -m compileall`) inside the AI Studio container alongside live frontend checks (`npm run lint`, `npm test`, `npm run build`), while live `pytest` execution remains `NOT RUN` here (no `pip`/`pytest`/PostgreSQL 16 in container) pending local/CI PostgreSQL execution.
++  - Verifies `0001_initial_foundation` -> `0002_invites_and_rate_limits` -> `0003_doc_failed_scan_status` revision IDs fit `alembic_version` `VARCHAR(32)` in a single linear chain, verifies migrations wrap check constraints in `op.f(...)` matching `Base.metadata.tables`, and executes live PostgreSQL `upgrade -> constraint inspection & enforcement (including FAILED/invalid document scan_status) -> downgrade base -> upgrade head`.
++- **Container & Remote CI Verification Note:** GitHub Actions **CI #14 (`44376162876`)** passed on `a873fcb`; **CI #15 (`44790860644`)**, **CI #16 (`44795541169`)**, and **CI #17 (`44800309064` on `fa89175a`)** passed Frontend CI (`Node 22`) and failed Step 9 (`pytest -v -ra` on `Python 3.12` + `PostgreSQL 16`). Task 002.4C repairs (`test_documents.py`, migration `0003`, `DocumentUploadSizeLimitMiddleware`, inline PDF CSP header, and NUL-byte field validation) have been statically bytecode-compiled (`python3 -m compileall`) in the AI Studio container; full `pytest` and PostgreSQL 16 migration execution remains `NOT RUN` locally pending Python 3.12+ + PostgreSQL 16+ or GitHub Actions CI.
+ 
+ ## 4. Browser QA Coverage (Executed in Task 001.3 via Playwright Chromium)
+ 

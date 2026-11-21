@@ -26,9 +26,20 @@ from app.services.storage_service import (
 logger = logging.getLogger(__name__)
 
 
-def _clean_optional_text(value: str | None, *, max_len: int) -> str | None:
+def _clean_optional_text(
+    value: str | None,
+    *,
+    max_len: int,
+    field_label: str = "field",
+) -> str | None:
     if value is None:
         return None
+    if "\x00" in value:
+        raise AppError(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            code="VALIDATION_ERROR",
+            message=f"{field_label} contains invalid NUL characters.",
+        )
     cleaned = " ".join(value.strip().split())
     if not cleaned:
         return None
@@ -53,6 +64,16 @@ def upload_workspace_document(
     expected_spec, safe_filename = validate_declared_upload_type(
         raw_filename=raw_filename,
         declared_content_type=declared_content_type,
+    )
+    cleaned_supplier_name = _clean_optional_text(
+        supplier_name,
+        max_len=240,
+        field_label="supplierName",
+    )
+    cleaned_invoice_number = _clean_optional_text(
+        invoice_number,
+        max_len=100,
+        field_label="invoiceNumber",
     )
 
     document_id = uuid.uuid4()
@@ -107,13 +128,9 @@ def upload_workspace_document(
                 ws_settings.company_gstin if ws_settings is not None else None
             )
 
-            resolved_supplier_name = (
-                _clean_optional_text(supplier_name, max_len=240)
-                or "Pending Extraction"
-            )
+            resolved_supplier_name = cleaned_supplier_name or "Pending Extraction"
             resolved_invoice_number = (
-                _clean_optional_text(invoice_number, max_len=100)
-                or f"DRAFT-{str(document.id)[:8].upper()}"
+                cleaned_invoice_number or f"DRAFT-{str(document.id)[:8].upper()}"
             )
             normalized_invoice_number = resolved_invoice_number.strip().lower()[:100]
 

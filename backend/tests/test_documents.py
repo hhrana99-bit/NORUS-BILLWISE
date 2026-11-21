@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
+import json
 import os
 import uuid
 from collections.abc import Callable, Generator
@@ -23,16 +25,20 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings, get_settings
 from app.core.cookies import CSRF_COOKIE_NAME
 from app.core.errors import AppError
-from app.main import create_app
+from app.main import DocumentUploadSizeLimitMiddleware, create_app
 from app.models.accounting import Document, Invoice
 from app.models.review import AuditEvent
 from app.schemas.documents import DocumentDto, DocumentUploadResponse
 from app.services.document_service import (
+    _clean_optional_text,
     build_content_disposition,
     get_clean_document_stream,
+    upload_workspace_document,
 )
 from app.services.storage_service import (
     MAX_DOCUMENT_BYTES,
+    MAX_DOCUMENT_UPLOAD_REQUEST_BYTES,
+    MAX_MULTIPART_OVERHEAD_BYTES,
     STREAM_CHUNK_SIZE,
     LocalFilesystemStorage,
     build_workspace_document_storage_key,
@@ -144,11 +150,12 @@ def test_filename_sanitization_and_content_disposition_safety() -> None:
     assert bounded.endswith(".pdf")
 
     assert sanitize_original_filename("...", fallback_ext=".pdf") == "document.pdf"
+    assert sanitize_original_filename('vendor\r\n"report".pdf') == "vendor_report_.pdf"
     assert (
         build_content_disposition(
             original_filename='vendor\r\n"report".pdf', download=False
         )
-        == 'inline; filename="vendor _report_.pdf"'
+        == 'inline; filename="vendor_report_.pdf"'
     )
     assert (
         build_content_disposition(original_filename="invoice.pdf", download=True)
@@ -418,6 +425,201 @@ def test_get_clean_document_stream_blocks_all_non_clean_statuses(
     )
     assert returned_doc.id == doc_id
     assert b"".join(stream) == payload
+
+
+def test_clean_optional_text_and_upload_reject_nul_bytes_before_storage(
+    tmp_path: Path,
+) -> None:
+    assert _clean_optional_text(None, max_len=240) is None
+    assert _clean_optional_text("   \t\n  ", max_len=240) is None
+    assert (
+        _clean_optional_text("  Acme   Enterprises \n Pvt Ltd ", max_len=240)
+        == "Acme Enterprises Pvt Ltd"
+    )
+    assert len(_clean_optional_text("A" * 300, max_len=240) or "") == 240
+
+    for bad_val in ("Acme\x00Corp", "   \x00   ", "INV-01\x00"):
+        with pytest.raises(AppError) as nul_exc:
+            _clean_optional_text(bad_val, max_len=240, field_label="supplierName")
+        assert nul_exc.value.status_code == 422
+        assert nul_exc.value.code == "VALIDATION_ERROR"
+
+    storage_root = tmp_path / "nul_guard_storage"
+    storage = LocalFilesystemStorage(storage_root)
+    dummy_ws = SimpleNamespace(
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        name="Workspace",
+    )
+    dummy_actor = SimpleNamespace(id=uuid.uuid4(), full_name="Uploader")
+
+    class _NoDbSession:
+        def add(self, _obj: object) -> None:
+            raise AssertionError("DB should not be touched on NUL validation error")
+
+    for kwargs in (
+        {"supplier_name": "Acme\x00Supplies"},
+        {"invoice_number": "INV\x002026"},
+        {"supplier_name": "Acme\x00Supplies", "create_draft_invoice": False},
+    ):
+        with pytest.raises(AppError) as up_exc:
+            upload_workspace_document(
+                _NoDbSession(),  # type: ignore[arg-type]
+                storage=storage,
+                workspace=dummy_ws,  # type: ignore[arg-type]
+                actor=dummy_actor,  # type: ignore[arg-type]
+                raw_filename="invoice.pdf",
+                declared_content_type="application/pdf",
+                file_stream=io.BytesIO(_pdf_bytes()),
+                **kwargs,  # type: ignore[arg-type]
+            )
+        assert up_exc.value.status_code == 422
+        assert up_exc.value.code == "VALIDATION_ERROR"
+        assert list(storage_root.rglob("*")) == []
+
+
+def test_asgi_upload_size_limit_middleware_pre_multipart_and_chunked_streaming() -> None:
+    assert MAX_DOCUMENT_UPLOAD_REQUEST_BYTES == (
+        MAX_DOCUMENT_BYTES + MAX_MULTIPART_OVERHEAD_BYTES
+    )
+
+    ws_id = uuid.uuid4()
+    upload_path = f"/api/v1/workspaces/{ws_id}/documents"
+
+    async def _run() -> None:
+        inner_calls = 0
+
+        async def _inner_app(scope: object, receive: object, send: object) -> None:
+            nonlocal inner_calls
+            inner_calls += 1
+            while True:
+                msg = await receive()  # type: ignore[misc]
+                if msg["type"] == "http.request" and not msg.get("more_body", False):
+                    break
+            await send(  # type: ignore[misc]
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send(  # type: ignore[misc]
+                {"type": "http.response.body", "body": b'{"ok":true}', "more_body": False}
+            )
+
+        middleware = DocumentUploadSizeLimitMiddleware(
+            _inner_app,
+            api_v1_prefix="/api/v1",
+            max_request_bytes=1024,
+        )
+
+        # 1. Oversized Content-Length rejected before inner app or receive() is ever called
+        sent_cl: list[dict[str, object]] = []
+        cl_reads = 0
+
+        async def _cl_receive() -> dict[str, object]:
+            nonlocal cl_reads
+            cl_reads += 1
+            return {"type": "http.request", "body": b"ignored", "more_body": False}
+
+        async def _cl_send(msg: dict[str, object]) -> None:
+            sent_cl.append(msg)
+
+        await middleware(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": upload_path,
+                "headers": [(b"content-length", b"1025")],
+                "state": {"request_id": "req_cl_test"},
+            },
+            _cl_receive,
+            _cl_send,  # type: ignore[arg-type]
+        )
+        assert inner_calls == 0
+        assert cl_reads == 0
+        starts = [m for m in sent_cl if m["type"] == "http.response.start"]
+        bodies = [m for m in sent_cl if m["type"] == "http.response.body"]
+        assert len(starts) == 1
+        assert starts[0]["status"] == 413
+        assert len(bodies) == 1
+        err_payload = json.loads(bodies[0]["body"].decode("utf-8"))  # type: ignore[union-attr]
+        assert err_payload["error"]["code"] == "FILE_TOO_LARGE"
+        assert err_payload["error"]["requestId"] == "req_cl_test"
+
+        # 2. Streamed request without Content-Length exceeding limit aborts early with 1 response
+        sent_stream: list[dict[str, object]] = []
+        chunks = [b"x" * 512, b"y" * 600, b"z" * 4096]
+        chunk_idx = 0
+
+        async def _stream_receive() -> dict[str, object]:
+            nonlocal chunk_idx
+            if chunk_idx >= len(chunks):
+                return {"type": "http.request", "body": b"", "more_body": False}
+            data = chunks[chunk_idx]
+            chunk_idx += 1
+            return {
+                "type": "http.request",
+                "body": data,
+                "more_body": chunk_idx < len(chunks),
+            }
+
+        async def _stream_send(msg: dict[str, object]) -> None:
+            sent_stream.append(msg)
+
+        await middleware(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": upload_path,
+                "headers": [],
+                "state": {"request_id": "req_stream_test"},
+            },
+            _stream_receive,
+            _stream_send,  # type: ignore[arg-type]
+        )
+        # Aborted on chunk 2 (1112 > 1024), never pulled chunk 3
+        assert chunk_idx == 2
+        stream_starts = [m for m in sent_stream if m["type"] == "http.response.start"]
+        stream_bodies = [m for m in sent_stream if m["type"] == "http.response.body"]
+        assert len(stream_starts) == 1
+        assert stream_starts[0]["status"] == 413
+        assert len(stream_bodies) == 1
+        stream_err = json.loads(stream_bodies[0]["body"].decode("utf-8"))  # type: ignore[union-attr]
+        assert stream_err["error"]["code"] == "FILE_TOO_LARGE"
+        assert stream_err["error"]["requestId"] == "req_stream_test"
+
+        # 3. Other routes bypass limit completely even with larger body / Content-Length
+        sent_other: list[dict[str, object]] = []
+        other_chunks = [b"a" * 2048]
+        other_idx = 0
+
+        async def _other_receive() -> dict[str, object]:
+            nonlocal other_idx
+            if other_idx >= len(other_chunks):
+                return {"type": "http.request", "body": b"", "more_body": False}
+            data = other_chunks[other_idx]
+            other_idx += 1
+            return {"type": "http.request", "body": data, "more_body": False}
+
+        async def _other_send(msg: dict[str, object]) -> None:
+            sent_other.append(msg)
+
+        await middleware(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": f"/api/v1/workspaces/{ws_id}/suppliers",
+                "headers": [(b"content-length", b"2048")],
+                "state": {},
+            },
+            _other_receive,
+            _other_send,  # type: ignore[arg-type]
+        )
+        assert inner_calls == 2
+        assert sent_other[0]["status"] == 200
+
+    asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +1004,149 @@ def test_document_upload_rejects_spoofed_magic_oversize_and_empty_with_no_disk_l
         == []
     )
 
+    # 5. Embedded NUL bytes in supplierName or invoiceNumber -> 422 VALIDATION_ERROR cleanly
+    for bad_field, bad_val in (
+        ("supplierName", "Acme\x00Holdings"),
+        ("invoiceNumber", "INV-\x00999"),
+    ):
+        nul_resp = client.post(
+            f"/api/v1/workspaces/{ws_id}/documents",
+            headers=_csrf_headers(client),
+            files={"file": ("valid.pdf", _pdf_bytes(512), "application/pdf")},
+            data={bad_field: bad_val},
+        )
+        assert nul_resp.status_code == 422, nul_resp.text
+        assert nul_resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    assert [p for p in storage_root.rglob("*") if p.is_file()] == []
+
+
+def test_document_upload_asgi_request_body_limit_before_multipart_parsing(
+    make_client: Callable[..., TestClient],
+    pg_settings: Settings,
+    storage_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = make_client()
+    uid = uuid.uuid4().hex[:8]
+    reg = _register_user(client, prefix="doc_asgi", org_name=f"ASGI Firm {uid}")
+    ws_id = reg["workspace"]["workspaceId"]
+
+    parser_invoked = False
+
+    def _fail_if_reached(*_args: object, **_kwargs: object) -> object:
+        nonlocal parser_invoked
+        parser_invoked = True
+        raise AssertionError("Multipart upload handler should not run on oversized request")
+
+    monkeypatch.setattr(
+        "app.api.v1.documents.upload_workspace_document",
+        _fail_if_reached,
+    )
+
+    # 1. Oversized Content-Length rejected at ASGI layer before multipart parsing, preserving CORS & requestId
+    csrf_headers = _csrf_headers(client, origin="http://localhost:3000")
+    oversized_cl_resp = client.post(
+        f"/api/v1/workspaces/{ws_id}/documents",
+        headers={
+            **csrf_headers,
+            "Content-Type": "multipart/form-data; boundary=----boundary",
+            "Content-Length": str(MAX_DOCUMENT_UPLOAD_REQUEST_BYTES + 1),
+        },
+        content=b"small",
+    )
+    assert oversized_cl_resp.status_code == 413
+    assert oversized_cl_resp.json()["error"]["code"] == "FILE_TOO_LARGE"
+    assert oversized_cl_resp.json()["error"]["requestId"].startswith("req_")
+    assert oversized_cl_resp.headers.get("x-request-id") == oversized_cl_resp.json()["error"]["requestId"]
+    assert oversized_cl_resp.headers.get("access-control-allow-origin") == "http://localhost:3000"
+    assert parser_invoked is False
+
+    # 2. Streamed request without Content-Length exceeding 16 MiB against real create_app ASGI app
+    app = create_app(pg_settings)
+    chunk_size = 512 * 1024  # 512 KiB
+    total_chunks = (MAX_DOCUMENT_UPLOAD_REQUEST_BYTES // chunk_size) + 4
+    sent_messages: list[dict[str, object]] = []
+    chunks_pulled = 0
+    cookie_header = "; ".join(f"{k}={v}" for k, v in client.cookies.items()).encode("ascii")
+    csrf_token_val = (client.cookies.get(CSRF_COOKIE_NAME) or "").encode("ascii")
+
+    async def _run_chunked_asgi() -> None:
+        async def _receive() -> dict[str, object]:
+            nonlocal chunks_pulled
+            if chunks_pulled >= total_chunks:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            chunks_pulled += 1
+            prefix = (
+                b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"x.pdf\"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.7\n"
+                if chunks_pulled == 1
+                else b"0" * chunk_size
+            )
+            body = prefix.ljust(chunk_size, b"0")[:chunk_size]
+            return {
+                "type": "http.request",
+                "body": body,
+                "more_body": chunks_pulled < total_chunks,
+            }
+
+        async def _send(msg: dict[str, object]) -> None:
+            sent_messages.append(msg)
+
+        await app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": f"/api/v1/workspaces/{ws_id}/documents",
+                "raw_path": f"/api/v1/workspaces/{ws_id}/documents".encode("ascii"),
+                "query_string": b"",
+                "headers": [
+                    (b"host", b"testserver"),
+                    (b"content-type", b"multipart/form-data; boundary=b"),
+                    (b"origin", b"http://localhost:3000"),
+                    (b"cookie", cookie_header),
+                    (b"x-csrf-token", csrf_token_val),
+                ],
+                "client": ("127.0.0.1", 50000),
+                "server": ("testserver", 80),
+            },
+            _receive,
+            _send,  # type: ignore[arg-type]
+        )
+
+    try:
+        asyncio.run(_run_chunked_asgi())
+    finally:
+        app.state.engine.dispose()
+    starts = [m for m in sent_messages if m["type"] == "http.response.start"]
+    bodies = [m for m in sent_messages if m["type"] == "http.response.body"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 413
+    assert len(bodies) == 1
+    err_json = json.loads(bodies[0]["body"].decode("utf-8"))  # type: ignore[union-attr]
+    assert err_json["error"]["code"] == "FILE_TOO_LARGE"
+    assert chunks_pulled < total_chunks
+    assert parser_invoked is False
+
+    # 3. Normal upload & other routes still function normally once monkeypatch is restored
+    monkeypatch.undo()
+    ok_resp = client.post(
+        f"/api/v1/workspaces/{ws_id}/documents",
+        headers=_csrf_headers(client),
+        files={"file": ("within_limit.pdf", _pdf_bytes(4096), "application/pdf")},
+        data={"supplierName": "Valid   Supplier ", "invoiceNumber": " INV-001 "},
+    )
+    assert ok_resp.status_code == 201, ok_resp.text
+
+    supplier_resp = client.post(
+        f"/api/v1/workspaces/{ws_id}/suppliers",
+        headers=_csrf_headers(client),
+        json={"name": "Unaffected Supplier Route"},
+    )
+    assert supplier_resp.status_code == 201, supplier_resp.text
+
 
 def test_document_db_failure_triggers_storage_cleanup_and_rollback(
     make_client: Callable[..., TestClient],
@@ -970,7 +1315,17 @@ def test_document_scan_gating_safe_streaming_headers_rbac_csrf_and_isolation(
     assert skipped_content.status_code == 409
     assert skipped_content.json()["error"]["code"] == "DOCUMENT_SCAN_NOT_CLEAN"
 
-    # 3. INFECTED blocked (403 DOCUMENT_INFECTED)
+    # 3. FAILED blocked (409 DOCUMENT_SCAN_NOT_CLEAN) — verifies PostgreSQL CHECK constraint too
+    db_doc.scan_status = "FAILED"
+    db_session.commit()
+
+    failed_content = admin_client.get(
+        f"/api/v1/workspaces/{ws1_id}/documents/{doc_id}/content"
+    )
+    assert failed_content.status_code == 409
+    assert failed_content.json()["error"]["code"] == "DOCUMENT_SCAN_NOT_CLEAN"
+
+    # 4. INFECTED blocked (403 DOCUMENT_INFECTED)
     db_doc.scan_status = "INFECTED"
     db_session.commit()
 
@@ -980,7 +1335,7 @@ def test_document_scan_gating_safe_streaming_headers_rbac_csrf_and_isolation(
     assert infected_content.status_code == 403
     assert infected_content.json()["error"]["code"] == "DOCUMENT_INFECTED"
 
-    # 4. CLEAN unlocks safe streaming with strict security headers to all active workspace roles
+    # 5. CLEAN unlocks safe streaming with strict security headers to all active workspace roles
     db_doc.scan_status = "CLEAN"
     db_session.commit()
 
@@ -993,6 +1348,7 @@ def test_document_scan_gating_safe_streaming_headers_rbac_csrf_and_isolation(
         assert inline_resp.headers["content-type"] == "application/pdf"
         assert inline_resp.headers["x-content-type-options"] == "nosniff"
         assert inline_resp.headers["cache-control"] == "private, no-store"
+        assert inline_resp.headers["content-security-policy"] == "sandbox"
         assert (
             inline_resp.headers["content-disposition"]
             == 'inline; filename="invoice_scan.pdf"'
@@ -1010,6 +1366,22 @@ def test_document_scan_gating_safe_streaming_headers_rbac_csrf_and_isolation(
     )
     assert download_resp.headers["x-content-type-options"] == "nosniff"
     assert download_resp.headers["cache-control"] == "private, no-store"
+    assert "content-security-policy" not in download_resp.headers
+
+    # Inline PNG image preserves image headers without interfering with attachment behavior
+    png_doc_id = rev_resp.json()["document"]["id"]
+    png_db_doc = db_session.get(Document, uuid.UUID(png_doc_id))
+    assert png_db_doc is not None
+    png_db_doc.scan_status = "CLEAN"
+    db_session.commit()
+    png_inline = viewer_client.get(
+        f"/api/v1/workspaces/{ws1_id}/documents/{png_doc_id}/content"
+    )
+    assert png_inline.status_code == 200
+    assert png_inline.headers["content-type"] == "image/png"
+    assert png_inline.headers["x-content-type-options"] == "nosniff"
+    assert png_inline.headers["cache-control"] == "private, no-store"
+    assert "content-security-policy" not in png_inline.headers
 
     # Cross-workspace isolation (foreign tenant + sibling workspace in same org) -> 404
     assert (

@@ -109,7 +109,7 @@ class Document(Base):
         ),
         CheckConstraint("page_count >= 1", name="document_page_count_min"),
         CheckConstraint(
-            "scan_status IN ('PENDING', 'CLEAN', 'INFECTED', 'SKIPPED_DEV')",
+            "scan_status IN ('PENDING', 'CLEAN', 'INFECTED', 'FAILED', 'SKIPPED_DEV')",
             name="document_scan_status_valid",
         ),
         Index("ix_documents_workspace_sha256", "workspace_id", "sha256_checksum"),

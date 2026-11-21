@@ -433,6 +433,62 @@ def test_alembic_upgrade_and_downgrade_on_postgresql(
                     or "ck_invoices_invoice_discount_mode_valid"
                     in str(discount_exc.value)
                 )
+
+                # 6. Documents scan_status allows FAILED and rejects invalid values
+                doc_id = str(uuid.uuid4())
+                with conn.begin_nested():
+                    conn.execute(
+                        text(
+                            "INSERT INTO documents ("
+                            "id, workspace_id, uploaded_by_user_id, original_filename, "
+                            "storage_key, mime_type, byte_size, sha256_checksum, scan_status"
+                            ") VALUES ("
+                            "CAST(:id AS uuid), CAST(:ws_id AS uuid), CAST(:user_id AS uuid), "
+                            ":fname, :skey, 'application/pdf', 128, :sha, 'FAILED'"
+                            ")"
+                        ),
+                        {
+                            "id": doc_id,
+                            "ws_id": ws_id,
+                            "user_id": user_id,
+                            "fname": "scan-failed.pdf",
+                            "skey": f"orgs/{org_id}/workspaces/{ws_id}/{doc_id}.pdf",
+                            "sha": "a" * 64,
+                        },
+                    )
+
+                with pytest.raises(IntegrityError) as doc_scan_exc:
+                    with conn.begin_nested():
+                        bad_doc_id = str(uuid.uuid4())
+                        conn.execute(
+                            text(
+                                "INSERT INTO documents ("
+                                "id, workspace_id, uploaded_by_user_id, original_filename, "
+                                "storage_key, mime_type, byte_size, sha256_checksum, scan_status"
+                                ") VALUES ("
+                                "CAST(:id AS uuid), CAST(:ws_id AS uuid), CAST(:user_id AS uuid), "
+                                ":fname, :skey, 'application/pdf', 128, :sha, 'INVALID_STATUS'"
+                                ")"
+                            ),
+                            {
+                                "id": bad_doc_id,
+                                "ws_id": ws_id,
+                                "user_id": user_id,
+                                "fname": "scan-bad.pdf",
+                                "skey": f"orgs/{org_id}/workspaces/{ws_id}/{bad_doc_id}.pdf",
+                                "sha": "b" * 64,
+                            },
+                        )
+                doc_scan_diag = getattr(
+                    getattr(doc_scan_exc.value.orig, "diag", None),
+                    "constraint_name",
+                    None,
+                )
+                assert (
+                    doc_scan_diag == "ck_documents_document_scan_status_valid"
+                    or "ck_documents_document_scan_status_valid"
+                    in str(doc_scan_exc.value)
+                )
             finally:
                 tx.rollback()
 
@@ -557,7 +613,7 @@ def test_alembic_revision_ids_fit_alembic_version_and_linear_chain() -> None:
     }
     assert referenced_parents.issubset(revisions.keys())
     heads = [rev for rev in revisions if rev not in referenced_parents]
-    assert heads == ["0002_invites_and_rate_limits"]
+    assert heads == ["0003_doc_failed_scan_status"]
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,10 @@ from fastapi import status
 from app.core.errors import AppError
 
 MAX_DOCUMENT_BYTES = 15 * 1024 * 1024  # 15 MB (15,728,640 bytes)
+MAX_MULTIPART_OVERHEAD_BYTES = 1 * 1024 * 1024  # 1 MiB (1,048,576 bytes) for multipart boundaries/fields
+MAX_DOCUMENT_UPLOAD_REQUEST_BYTES = (
+    MAX_DOCUMENT_BYTES + MAX_MULTIPART_OVERHEAD_BYTES
+)  # 16 MiB (16,777,216 bytes) total HTTP request-body cap enforced before multipart parsing
 STREAM_CHUNK_SIZE = 65_536  # 64 KB bounded streaming chunks
 MAGIC_HEADER_PEEK_BYTES = 16
 

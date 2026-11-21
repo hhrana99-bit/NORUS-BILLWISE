@@ -3,8 +3,8 @@
 ## Immediate Verification Prerequisite (Run Outside Container Runtime)
 
 Before starting Task 002.5 implementation:
-1. Inspect and resolve the backend `pytest` failure observed on GitHub Actions **CI #15 (`44790860644`)** for `c0c0b615` (`test_suppliers.py` / Task 002.4A).
-2. Run the full `pytest` suite including `test_documents.py` (Task 002.4B) on **Python 3.12+ + PostgreSQL 16+** (locally or via GitHub Actions CI):
+1. Synchronize Task 002.4C (`test_documents.py`, migration `0003_doc_failed_scan_status`, ASGI pre-multipart upload size limit, inline PDF `Content-Security-Policy: sandbox`, NUL-byte validation, and docs) onto a feature branch off `fa89175a09404f4a1cedfa9a2a296da2b25c1553`.
+2. Run the full `pytest` suite and Alembic upgrade/downgrade cycle on **Python 3.12+ + PostgreSQL 16+** (locally or via GitHub Actions CI) and confirm green Step 9 CI:
 
 ```bash
 cd backend
@@ -21,7 +21,7 @@ pytest -v -ra
 ## Next Development Milestone: NORUS BILLWISE TASK 002.5 — Invoices CRUD, Flexible Indian GST & Line-Item Reconciliation Engine, and Advisory Duplicate Detection
 
 ### Objective
-Implement the core invoice lifecycle APIs on top of Task 002.4A (`suppliers`) and Task 002.4B (`documents`), delivering flexible GST & line-item reconciliation, advisory duplicate detection, strict RBAC/CSRF/tenant isolation, and mandatory human-review gating (never auto-verifying invoices).
+Implement the core invoice lifecycle APIs on top of Task 002.4A (`suppliers`) and Task 002.4B/C (`documents`), delivering flexible GST & line-item reconciliation, advisory duplicate detection, strict RBAC/CSRF/tenant isolation, and mandatory human-review gating (never auto-verifying invoices).
 
 ### Deliverables
 
@@ -31,7 +31,7 @@ Implement the core invoice lifecycle APIs on top of Task 002.4A (`suppliers`) an
 2. **Advisory Duplicate Warning Engine (`backend/app/services/invoice_service.py`)**
    - Detect workspace-scoped active (`deleted_at IS NULL`) invoices sharing supplier/normalized invoice number (respecting `WorkspaceSettings.enable_duplicate_warnings`) and populate advisory `duplicateWarning` for human review rather than silent rejection.
 3. **Production Malware Scan & Object Storage Worker Hook (Preparation / Follow-on)**
-   - Add an async scan-transition workflow (e.g., ClamAV worker or presigned S3/MinIO adapter) so validated uploads can progress safely from `PENDING` to `CLEAN` or `INFECTED` before Review Centre streaming.
+   - Implement an S3/MinIO `DocumentStorage` adapter and an async malware scan worker (e.g., ClamAV) so validated `PENDING` uploads can progress safely to `CLEAN`, `INFECTED`, or `FAILED` before production deployment.
 4. **PostgreSQL 16 Integration Tests (`backend/tests/test_invoices.py`)**
    - Cover GST intra/inter-state & `PRE_TAX`/`POST_TAX_COMMERCIAL` discount arithmetic, rounding tolerance, line-item variance advisories, duplicate warnings, `UPLOADER` edit restriction to `PENDING_REVIEW` only, `VERIFIED` lock (`409 VERIFIED_INVOICE_LOCKED`), soft-deleted invoice exclusion, CSRF, and cross-workspace `404` isolation.
 
