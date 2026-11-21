@@ -3,8 +3,8 @@
 ## Immediate Verification Prerequisite (Run Outside Container Runtime)
 
 Before starting Task 002.5 implementation:
-1. Synchronize Task 002.4C (`test_documents.py`, migration `0003_doc_failed_scan_status`, ASGI pre-multipart upload size limit, inline PDF `Content-Security-Policy: sandbox`, NUL-byte validation, and docs) onto a feature branch off `fa89175a09404f4a1cedfa9a2a296da2b25c1553`.
-2. Run the full `pytest` suite and Alembic upgrade/downgrade cycle on **Python 3.12+ + PostgreSQL 16+** (locally or via GitHub Actions CI) and confirm green Step 9 CI:
+1. Open a feature branch off current remote `main` commit `1adcbdcd558bac2821ade1db1b3ee4b5b4db7d6f` with Task 002.4D (`status.HTTP_413_REQUEST_ENTITY_TOO_LARGE` fix in `backend/app/main.py` and `backend/app/services/storage_service.py`, removal of `/task-002-4c.patch`, and documentation updates).
+2. Inspect the CI #18 (`44877773232`) Step 9 log (or run `pytest -v -ra` on **Python 3.12 + PostgreSQL 16**) to confirm the 4 document tests pass and identify/resolve the remaining 5th failure from CI #18 (`5 failed, 92 passed, 1 warning`):
 
 ```bash
 cd backend

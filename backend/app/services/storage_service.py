@@ -297,7 +297,7 @@ class LocalFilesystemStorage:
         total_bytes = len(first_chunk)
         if total_bytes > max_bytes:
             raise AppError(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 code="FILE_TOO_LARGE",
                 message="Uploaded document exceeds the 15 MB maximum file size.",
             )
@@ -309,7 +309,7 @@ class LocalFilesystemStorage:
             total_bytes += len(more)
             if total_bytes > max_bytes:
                 raise AppError(
-                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     code="FILE_TOO_LARGE",
                     message="Uploaded document exceeds the 15 MB maximum file size.",
                 )
@@ -350,7 +350,7 @@ class LocalFilesystemStorage:
                     total_bytes += len(chunk)
                     if total_bytes > max_bytes:
                         raise AppError(
-                            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                             code="FILE_TOO_LARGE",
                             message="Uploaded document exceeds the 15 MB maximum file size.",
                         )

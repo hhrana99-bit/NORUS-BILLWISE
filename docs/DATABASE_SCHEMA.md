@@ -219,11 +219,12 @@
   - `byte_size BIGINT NOT NULL`
   - `sha256_checksum CHAR(64) NOT NULL`
   - `page_count INTEGER NOT NULL DEFAULT 1`
-  - `scan_status VARCHAR(24) NOT NULL DEFAULT 'PENDING'` (`PENDING`, `CLEAN`, `INFECTED`, `SKIPPED_DEV`)
+  - `scan_status VARCHAR(24) NOT NULL DEFAULT 'PENDING'` (`PENDING`, `CLEAN`, `INFECTED`, `FAILED`, `SKIPPED_DEV`)
   - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
 - **Constraints:**
   - `CHECK (byte_size > 0 AND byte_size <= 15728640)`
   - `CHECK (page_count >= 1)`
+  - `CHECK (scan_status IN ('PENDING', 'CLEAN', 'INFECTED', 'FAILED', 'SKIPPED_DEV'))`
   - `UNIQUE (workspace_id, id)` (for composite tenant FK from `invoices`)
   - `INDEX (workspace_id, sha256_checksum)` (supports exact binary duplicate detection).
 

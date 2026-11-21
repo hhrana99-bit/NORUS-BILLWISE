@@ -27,7 +27,7 @@ class _UploadSizeExceededError(AppError):
 
     def __init__(self) -> None:
         super().__init__(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             code="FILE_TOO_LARGE",
             message=UPLOAD_SIZE_LIMIT_MESSAGE,
         )
@@ -134,7 +134,7 @@ class DocumentUploadSizeLimitMiddleware:
                 )
             else:
                 response = build_error_response(
-                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                     code="FILE_TOO_LARGE",
                     message=UPLOAD_SIZE_LIMIT_MESSAGE,
                     request_id=request_id,
@@ -179,7 +179,7 @@ class DocumentUploadSizeLimitMiddleware:
 
         if limit_exceeded and not response_started:
             response = build_error_response(
-                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 code="FILE_TOO_LARGE",
                 message=UPLOAD_SIZE_LIMIT_MESSAGE,
                 request_id=request_id,
