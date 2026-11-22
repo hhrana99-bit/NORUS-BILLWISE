@@ -120,7 +120,10 @@ def _webp_bytes(size: int = 128) -> bytes:
 
 
 def test_settings_rejects_blank_document_storage_root() -> None:
-    with pytest.raises(ValidationError, match="document_storage_root"):
+    with pytest.raises(
+        ValidationError,
+        match=r"(?i)DOCUMENT_STORAGE_ROOT cannot be blank\.",
+    ):
         Settings(
             _env_file=None,
             app_env="test",

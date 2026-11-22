@@ -1,12 +1,12 @@
 # NEXT_TASK — Exact Next Recommended Development Task
 
-## Immediate Blocker Before Task 002.5: CI #20 Step 9 Recovery
+## Immediate Verification Prerequisite Before Task 002.5: Confirm Green CI for Task 002.4G
 
-Remote `main` (`e022634a7e2265231f12e5a101ca631fd0374deb`) already includes the Task 002.4D `HTTP_413_REQUEST_ENTITY_TOO_LARGE` fixes, `task-002-4c.patch` removal, and `docs/DATABASE_SCHEMA.md` update, **but GitHub Actions CI #20 (`45008480467`) still fails at Backend Step 9 (`pytest -v -ra`)** while raw CI logs return `HTTP 403` without authentication.
+Remote `main` (`f7cd90c49689fe6e93aab96bbffa269ecbe7a35f`) failed CI #21 (`45009400338`) solely on `tests/test_documents.py::test_settings_rejects_blank_document_storage_root` (`1 failed, 96 passed, 1 warning`). Task 002.4G fixes that case-sensitive regex mismatch locally.
 
 Before starting Task 002.5 implementation:
-1. Inspect the authenticated **GitHub Actions CI #20 (`45008480467`) Step 9 log** (or run the full backend suite locally on **Python 3.12 + PostgreSQL 16** against `e022634a`) to obtain the exact failing test name(s) and traceback(s).
-2. Fix the root cause of the remaining Step 9 failure(s) on a feature branch off `e022634a7e2265231f12e5a101ca631fd0374deb` and remove the committed root `NORUS-TASK-002-4D.patch` artifact, then verify a 100% green CI run:
+1. Open a feature branch/PR off `f7cd90c49689fe6e93aab96bbffa269ecbe7a35f` with the Task 002.4G `backend/tests/test_documents.py` fix (and optionally remove root `NORUS-TASK-002-4D.patch`).
+2. Run the targeted test, full `pytest` suite, and PostgreSQL 16 migration cycle on **Python 3.12 + PostgreSQL 16** (locally or via GitHub Actions CI) to confirm 100% green CI:
 
 ```bash
 cd backend

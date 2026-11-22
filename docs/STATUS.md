@@ -1,18 +1,17 @@
 # STATUS — Project Progress
 
-**Current Milestone:** Task 002.4E — Main Branch Verification, CI Recovery & MVP Completion Planning  
-**Status:** Verified on remote `main` commit `e022634a7e2265231f12e5a101ca631fd0374deb` (parent `a793a7f9b21c651c353852afdb95c71fc5914541`). GitHub Actions **CI #20 (`45008480467`)** passed Frontend CI (`Node 22`) and Steps 1–8 of Backend CI (`compileall`, `pip install`, `Settings`, `alembic upgrade head` on PostgreSQL 16), and **failed Step 9 (`pytest -v -ra`)**. Full backend runtime verification remains `BLOCKED` in this container (Python 3.11 stdlib only, no PostgreSQL 16, and raw GitHub CI logs return `HTTP 403 Forbidden` without authentication).
+**Current Milestone:** Task 002.4G — Fix Final Document Settings Test Failure  
+**Status:** Task 002.4G Fix Implemented Locally (on top of verified remote GitHub `main` commit `f7cd90c49689fe6e93aab96bbffa269ecbe7a35f`, whose CI #21 run `45009400338` passed Frontend CI and failed Backend Step 9 with `1 failed, 96 passed, 1 warning`; live `pytest` and PostgreSQL 16 execution pending external Python 3.12 + PostgreSQL 16 / GitHub Actions CI run)
 
 ---
 
-## Verified State on `main` (`e022634a` / `a793a7f9`)
+## Completed Work in Task 002.4G (`f7cd90c4` + Local Repair)
 
-1. **Task 002.4D Changes Verified Live on `main` (`a793a7f9`)**
-   - All 6 references to `status.HTTP_413_CONTENT_TOO_LARGE` in `backend/app/main.py` and `backend/app/services/storage_service.py` were replaced with `status.HTTP_413_REQUEST_ENTITY_TOO_LARGE` for `fastapi==0.115.6` / Starlette `<0.42` compatibility.
-   - `task-002-4c.patch` was removed and `docs/DATABASE_SCHEMA.md` (`documents.scan_status`) was updated to document `'FAILED'`.
-2. **Remaining Hygiene & CI Investigation Items (`e022634a`)**
-   - Commit `e022634a` added `NORUS-TASK-002-4D.patch` (`83,931` bytes) into the repository root; it should be removed once CI Step 9 is diagnosed.
-   - Both CI #19 (`44904905295` on `a793a7f9`) and CI #20 (`45008480467` on `e022634a`) still failed Backend Step 9 (`pytest -v -ra`), indicating at least one non-HTTP-413 failure (matching the unidentified 5th failure from CI #18) remains unaddressed. Exact tracebacks require authenticated GitHub CI logs or a Python 3.12 + PostgreSQL 16 test run.
+1. **Fixed `test_settings_rejects_blank_document_storage_root` (`backend/tests/test_documents.py`)**
+   - Confirmed `backend/app/core/config.py` properly rejects blank `DOCUMENT_STORAGE_ROOT` with `ValueError("DOCUMENT_STORAGE_ROOT cannot be blank.")`.
+   - Updated the `pytest.raises(ValidationError, match=...)` assertion in `test_documents.py` from lowercase `"document_storage_root"` to case-insensitive `r"(?i)DOCUMENT_STORAGE_ROOT cannot be blank\."` without weakening validation or altering application config behavior.
+2. **Prior Task 002.4D/E Status on `main` (`a793a7f9` → `e022634a` → `f7cd90c4`)**
+   - All 6 `HTTP_413_REQUEST_ENTITY_TOO_LARGE` compatibility fixes, `task-002-4c.patch` removal, and `docs/` updates are live on `main` (`f7cd90c4`); `NORUS-TASK-002-4D.patch` remains in repo root from `e022634a`.
 
 ---
 
