@@ -1,23 +1,27 @@
 # STATUS — Project Progress
 
-**Current Milestone:** Task 002.4H — Consolidated CI Stabilization, Hygiene Cleanup & MVP Readiness  
-**Status:** Verified Remote `main` (`b3e0460959e996260a51f3c0e35673ee943640a4`) **CI #22 GREEN** (`45010488214`); Root Patch Hygiene & Docs Cleanup Applied Locally
+**Current Milestone:** Task 002.5 — Invoices CRUD, Flexible Indian GST Reconciliation & Advisory Duplicate Detection  
+**Status:** Verified Remote `main` (`389868fa2213389609de8aaa8c5b7e67044ba47a`, CI `45011666003` GREEN); Task 002.5 Implemented Locally (`compileall` + Frontend Passing; Live `pytest`/PostgreSQL 16 Execution `BLOCKED` Locally)
 
 ---
 
-## Completed Work in Task 002.4G / 002.4H (`b3e04609` + Cleanup)
+## Completed Work in Task 002.5 (Built on `389868fa`)
 
-1. **Green CI Recovery (`b3e04609` — GitHub Actions CI #22, Run `45010488214`)**
-   - Merged the Task 002.4G `backend/tests/test_documents.py` case-insensitive regex fix for `test_settings_rejects_blank_document_storage_root` into remote `main`.
-   - Confirmed both CI #22 jobs passed (`success`): `Frontend Lint, Test & Build (Node 22)` and `Backend Compilation, Pytest & PostgreSQL 16 Migrations` (`compileall`, `pip install`, `NoDecode`/`Settings`, `alembic upgrade head`, and `pytest -v -ra`).
-2. **Task 002.4H Repository & Documentation Cleanup**
-   - Removed the obsolete committed root patch file `NORUS-TASK-002-4D.patch` (`83,931` bytes) after verifying zero references in code, tests, or CI workflows.
-   - Synchronized `README.md`, `docs/STATUS.md`, `docs/NEXT_TASK.md`, `docs/TESTING.md`, and `docs/BACKEND_ARCHITECTURE.md` with verified baseline `b3e04609` and CI #22 green status.
+1. **Dedicated `Decimal` GST & Line-Item Reconciliation Engine (`backend/app/services/reconciliation_service.py`)**
+   - Deterministic `Decimal` (`ROUND_HALF_UP`) calculation of `computedExpectedTotal`, `varianceAmount`, `reconciliationStatus` (`PENDING_INPUT`, `MATCHED`, `WITHIN_ROUNDING_TOLERANCE`, `VARIANCE_DETECTED`), `lineItemsTaxableSum`, `lineItemVarianceAmount`, `lineItemReconciliationStatus` (`NO_LINE_ITEMS`, `MATCHED`, `VARIANCE_WARNING`), and structured advisory `discrepancies[]` (`MIXED_TAX_REGIME`, `CGST_SGST_ASYMMETRY`, `REGIME_STATE_MISMATCH`, `LINE_ITEM_MATH_VARIANCE`, `LINE_ITEM_TAX_SUM_MISMATCH`, `REVERSE_CHARGE_TAX_CHECK`, `SUPPLIER_GSTIN_FORMAT`, `EXCESSIVE_ROUND_OFF`).
+   - Shared `normalize_invoice_number` formatter invariance (`INV/2026-27/001` == `inv-2026-27-001` while keeping `10-1` != `1-01`) reused by `document_service.py`, plus Indian April–March financial year helpers.
+2. **Workspace-Scoped Invoices API & Advisory Duplicate Detection (`backend/app/schemas/invoices.py`, `backend/app/services/invoice_service.py`, `backend/app/api/v1/invoices.py`)**
+   - Implemented `GET /invoices` (escaped LIKE search, filters including `taxType`, `reconciliationStatus`, `lineItemReconciliationStatus`, `financialYear`, `dateFrom`..`dateTo`, sorting, pagination, zero N+1 query overhead), `POST /invoices` (always starts `PENDING_REVIEW`, `extra="forbid"`), `GET /invoices/{invoiceId}`, `PATCH /invoices/{invoiceId}` (`FOR UPDATE`, `VERIFIED` lock `409 VERIFIED_INVOICE_LOCKED`, `UPLOADER` `PENDING_REVIEW`-only restriction), and `DELETE /invoices/{invoiceId}` (`WORKSPACE_ADMIN` soft-delete on unverified invoices preserving child line items, flags, review actions, and audit logs).
+   - Validated workspace ownership (`404` on cross-workspace `supplierId`/`documentId`) and document scan gating (`409 DOCUMENT_INFECTED` / `409 DOCUMENT_SCAN_FAILED`).
+   - Implemented advisory duplicate warnings scoped to active workspace invoices (`NORMALIZED_INVOICE_NUMBER` within same Indian FY/180 days; `SIMILAR_TOTAL_WITHIN_45_DAYS` within `±₹0.01`), respecting `WorkspaceSettings.enable_duplicate_warnings`.
+   - Added comprehensive offline unit and PostgreSQL 16 integration tests in `backend/tests/test_invoices.py` without gratuitous Alembic migration churn (reusing existing `0001`–`0003` linear schema).
 
 ---
 
-## Prior Completed Work on `main` (`b3e04609` and earlier)
+## Prior Completed Work on `main` (`389868fa` and earlier)
 
+- **Task 002.4H (`b3e04609` → `389868fa`):** Removed obsolete root patch `NORUS-TASK-002-4D.patch`, aligned milestone docs, and confirmed CI `45011666003` green on `main`.
+- **Task 002.4G (`b3e04609`):** Fixed case-sensitive regex assertion in `test_settings_rejects_blank_document_storage_root` (`CI #22` `45010488214` green).
 - **Task 002.4D (`a793a7f9` → `f7cd90c4`):** `status.HTTP_413_REQUEST_ENTITY_TOO_LARGE` Starlette compatibility fix in `backend/app/main.py` and `backend/app/services/storage_service.py`, plus `task-002-4c.patch` removal.
 - **Task 002.4C (`1adcbdcd`):** Migration `0003_doc_failed_scan_status` (`FAILED` scan status), pure ASGI `RequestIdMiddleware` & `DocumentUploadSizeLimitMiddleware` (`16 MiB` pre-multipart limit), inline PDF `Content-Security-Policy: sandbox`, and pre-storage `\x00` NUL-byte validation on `supplierName`/`invoiceNumber`.
 - **Task 002.4B (`e255af40`):** Pluggable `DocumentStorage` + `LocalFilesystemStorage` (UUID keys, canonical path & symlink containment, `15 MB` streaming cap, magic-byte validation, optional draft invoice staging, `CLEAN`-only content streaming).
@@ -30,10 +34,9 @@
 ## Implemented vs. Deferred & MVP-Readiness Boundary
 
 - **Locally Executed & Passing (Container):** Python bytecode compilation (`python3 -m compileall -q backend/app backend/alembic backend/tests`) and React frontend (`npm run lint`, `npm test`, `npm run build`).
-- **Remotely Passing / Locally Blocked:** GitHub Actions **CI #22 (`45010488214`) PASSED** (`pytest -v -ra` + PostgreSQL 16 migrations). Live `pytest` and PostgreSQL 16 migration execution remain `BLOCKED` inside this container due to absent Python 3.12, backend dependencies, and PostgreSQL 16.
+- **Locally Blocked:** Live `pytest` execution (including `backend/tests/test_invoices.py`) and PostgreSQL 16 migration/integration verification remain `BLOCKED` inside this container due to absent Python 3.12, backend dependencies, and PostgreSQL 16; must run in GitHub Actions CI or a configured PostgreSQL 16 + Python 3.12 environment.
 - **A. Required Before Controlled Accounting-Firm Pilot:**
-  - **Task 002.5:** Invoices CRUD, flexible Indian GST & line-item `Decimal` reconciliation engine, and advisory duplicate detection.
-  - **Task 002.6:** Human Review workflow endpoints (`/verify`, `/flag`, `/flags/{flagId}/resolve`, `/reopen`, `WORKSPACE_ADMIN` unverified soft-delete, immutable `review_actions` & `audit_events`).
+  - **Task 002.6:** Human Review workflow endpoints (`/verify`, `/flag`, `/flags/{flagId}/resolve`, `/reopen`, `/review-history`, mandatory variance acknowledgment, immutable `review_actions` & `audit_events`).
   - **Task 002.7:** Backend Reports API (`/summary`, `/monthly-trend`, `/exceptions`, `/export.csv`) and Frontend `WorkspaceContext` API integration (`credentials: 'include'` + `X-CSRF-Token`, auth/workspace UI).
   - **Document Scan & Pilot Storage Readiness:** Wire real malware scanning (e.g., ClamAV async/inline worker) or a controlled non-production `CLEAN` transition gate so uploaded PDFs/images become streamable during pilot review, plus pilot HTTPS deployment config (`COOKIE_SECURE=true`, production `CORS_ORIGINS`, `TRUSTED_PROXIES`, persistent volume/object storage).
 - **B. Required Before Production Deployment:**

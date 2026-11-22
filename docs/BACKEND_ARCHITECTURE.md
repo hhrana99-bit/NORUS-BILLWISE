@@ -2,8 +2,8 @@
 
 **Company:** NORUS AI  
 **Product:** NORUS BILLWISE (*Beyond the World.*)  
-**Milestone:** Task 002.1A Target Architecture *(Tasks 002.2–002.4D implemented for Auth, Tenancy/RBAC, Suppliers, and Document Storage; Invoices, Human Review, Reports, Frontend API wiring, and S3/ClamAV remain pending)*  
-**Document Status:** Architecture Baseline (`b3e04609`; see `docs/STATUS.md` for live progress)
+**Milestone:** Task 002.5 Implemented Invoices & GST Reconciliation *(Tasks 002.2–002.5 implemented for Auth, Tenancy/RBAC, Suppliers, Document Storage, and Invoices/Reconciliation; Human Review actions, Reports, Frontend API wiring, and S3/ClamAV remain pending)*  
+**Document Status:** Task 002.5 Milestone (based on verified `main` `389868fa`; see `docs/STATUS.md` for live progress)
 
 ---
 
@@ -194,10 +194,9 @@ variance_amount = total_amount - expected_total
    - Any discrepancy exceeding `workspace_settings.rounding_tolerance` sets `line_item_reconciliation_status = 'VARIANCE_WARNING'` and populates an advisory `line_item_warning`.
    - **Non-blocking rule:** Line-item discrepancies **never automatically reject** invoice creation or updates. They remain visible in Review Centre and Reports and require human review confirmation (`confirmVarianceAcknowledgment = true`) before `VERIFIED` sign-off when unresolved.
 5. **Advisory Tax Regime & GSTIN Checks:**
-   - Intra-state (`CGST > 0` or `SGST > 0`) combined with `IGST > 0` triggers an advisory warning (`taxRegimeMismatch`), unless explained/overridden by reviewer.
-   - GSTIN format/checksum (`15`-char Indian GSTIN) runs as an advisory validator; placeholder/unregistered suppliers (`URD`) remain inspectable by CAs.
+   - Implemented in `backend/app/services/reconciliation_service.py`: intra-state (`CGST > 0` or `SGST > 0`) combined with `IGST > 0` triggers `MIXED_TAX_REGIME`; unequal CGST/SGST triggers `CGST_SGST_ASYMMETRY`; state-code mismatch against `place_of_supply_code` / `buyer_gstin` triggers `REGIME_STATE_MISMATCH`; non-placeholder invalid supplier GSTINs trigger `SUPPLIER_GSTIN_FORMAT`; RCM bills with non-zero GST trigger `REVERSE_CHARGE_TAX_CHECK`; round-offs beyond `±₹10.00` trigger `EXCESSIVE_ROUND_OFF`. Unregistered suppliers (`URD` / `PENDING-ENTRY`) remain inspectable by CAs.
 6. **Advisory Duplicate Detection:**
-   - Matches within the same `workspace_id` (excluding soft-deleted rows) by: (a) same supplier + normalized `invoice_number` (exact/case-insensitive), or (b) same supplier + `total_amount` within `±₹0.01` + `invoice_date` within 45 days. Always advisory (`duplicate_warning`), never auto-rejected.
+   - Implemented in `backend/app/services/invoice_service.py` using canonical `normalize_invoice_number` (collapsing separator/alpha-digit variations like `INV/2026-27/001` and `inv-2026-27-001` while keeping distinct numeric segments separate). Matches within the same `workspace_id` (`deleted_at IS NULL`, gated by `WorkspaceSettings.enable_duplicate_warnings`) by: (a) same supplier identity + normalized `invoice_number` within the same Indian April–March FY or 180 days, or (b) same supplier identity + `total_amount` within `±₹0.01` + `invoice_date` within 45 days. Always advisory (`duplicate_warning` + `duplicateMatches[]`), never auto-rejected.
 
 ---
 

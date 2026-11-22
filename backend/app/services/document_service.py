@@ -13,6 +13,7 @@ from app.core.errors import AppError
 from app.models.accounting import Document, Invoice
 from app.models.tenancy import User, Workspace, WorkspaceSettings, utc_now
 from app.services.audit_service import record_audit_event
+from app.services.reconciliation_service import normalize_invoice_number
 from app.services.storage_service import (
     MAX_DOCUMENT_BYTES,
     STREAM_CHUNK_SIZE,
@@ -132,7 +133,7 @@ def upload_workspace_document(
             resolved_invoice_number = (
                 cleaned_invoice_number or f"DRAFT-{str(document.id)[:8].upper()}"
             )
-            normalized_invoice_number = resolved_invoice_number.strip().lower()[:100]
+            normalized_invoice_number = normalize_invoice_number(resolved_invoice_number)
 
             draft_invoice = Invoice(
                 workspace_id=workspace.id,

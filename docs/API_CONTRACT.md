@@ -2,7 +2,7 @@
 
 **API Prefix:** `/api/v1`  
 **Framework:** FastAPI + Pydantic v2  
-**Milestone:** Task 002.1A Target REST Specification *(Auth, Organizations/Workspaces/RBAC, Suppliers, and Documents endpoints implemented in Tasks 002.2–002.4D; Invoices, Human Review, and Reports endpoints pending Task 002.5–002.7)*
+**Milestone:** Task 002.5 Implemented Invoices API *(Auth, Organizations/Workspaces/RBAC, Suppliers, Documents, and Invoices/GST Reconciliation implemented in Tasks 002.2–002.5; Human Review actions and Reports endpoints pending Task 002.6–002.7)*
 
 ---
 
@@ -277,43 +277,45 @@
 - **Errors:** `401 UNAUTHENTICATED`, `403 DOCUMENT_INFECTED`, `404 WORKSPACE_NOT_FOUND`, `404 DOCUMENT_NOT_FOUND`, `404 DOCUMENT_CONTENT_NOT_FOUND`, `409 DOCUMENT_SCAN_NOT_CLEAN`.
 
 ### `GET /api/v1/workspaces/{workspaceId}/invoices`
-- **Purpose:** Search, filter, and sort active (non-soft-deleted) workspace invoices.
-- **Auth:** Any active workspace member.
+- **Purpose:** Search, filter, sort, and paginate active (non-soft-deleted) workspace invoices without N+1 queries.
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`.
 - **Query Params:**
-  - `search` (matches invoice number, supplier name, GSTIN)
+  - `search` (escaped `ILIKE` match on `invoiceNumber`, `normalizedInvoiceNumber`, `supplierName`, `supplierGstin`, `buyerName`, `buyerGstin`)
   - `status` (`PENDING_REVIEW|VERIFIED|FLAGGED`)
   - `taxType` (`INTRA_STATE|INTER_STATE`)
-  - `supplierId` (`UUID`)
+  - `supplierId` (`UUID`), `documentId` (`UUID`)
   - `reconciliationStatus` (`MATCHED|WITHIN_ROUNDING_TOLERANCE|VARIANCE_DETECTED|PENDING_INPUT`)
   - `lineItemReconciliationStatus` (`NO_LINE_ITEMS|MATCHED|VARIANCE_WARNING`)
-  - `dateFrom`, `dateTo` (`YYYY-MM-DD`)
-  - `sortBy` (`invoiceNumber|supplierName|invoiceDate|totalAmount|taxAmount|status|uploadDate`)
-  - `sortDir` (`asc|desc`), `page`, `pageSize`
-- **Response (`200 OK`):** `{ "items": [...], "total": 24, "page": 1, "pageSize": 25 }`.
+  - `financialYear` (`YYYY-YY` or `YYYY-YYYY`, Indian April–March FY filter)
+  - `dateFrom`, `dateTo` (`YYYY-MM-DD`; rejects `dateFrom > dateTo` with `422`)
+  - `sortBy` (`invoiceNumber|supplierName|invoiceDate|totalAmount|taxAmount|status|uploadDate`, default `uploadDate`)
+  - `sortDir` (`asc|desc`, default `desc`), `page` (`>= 1`), `pageSize` (`1..100`)
+- **Response (`200 OK`):** `{ "items": [InvoiceSummaryDto...], "total": 24, "page": 1, "pageSize": 25 }`.
 
 ### `POST /api/v1/workspaces/{workspaceId}/invoices`
-- **Purpose:** Create a new `PENDING_REVIEW` invoice record manually or linked to an existing uploaded `documentId`. Cannot create an invoice directly in `VERIFIED` state, and **never rejects** an invoice due to line-item vs. header taxable variance (surfaces advisory `lineItemWarning` instead).
-- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER` + CSRF.
-- **Request Body:** Supplier/buyer snapshots, `invoiceNumber`, `invoiceDate`, `dueDate`, `currency`, `taxableAmount`, `discountAmount`, `discountMode`, `cgstAmount`, `sgstAmount`, `igstAmount`, `cessAmount`, `freightAmount`, `otherChargesAmount`, `roundOffAmount`, `totalAmount`, `lineItems[]`.
-- **Response (`201 Created`):** Full `InvoiceDetail` DTO with server-computed `computedExpectedTotal`, `varianceAmount`, `reconciliationStatus`, `lineItemsTaxableSum`, `lineItemVarianceAmount`, `lineItemReconciliationStatus`, `lineItemWarning`, and advisory `duplicateWarning`.
+- **Purpose:** Create a new `PENDING_REVIEW` invoice record manually or linked to an existing workspace `supplierId`/`documentId`. Strictly enforces `extra="forbid"` so callers cannot pass `status: "VERIFIED"` or verification actor fields, validates linked workspace ownership (`404` on foreign UUIDs) and document scan status (`409 DOCUMENT_INFECTED` / `409 DOCUMENT_SCAN_FAILED`), runs fixed-point `Decimal` GST & line-item reconciliation without ever rejecting arithmetic variance, checks advisory duplicates (when `WorkspaceSettings.enableDuplicateWarnings` is enabled), and emits `invoice.created` audit event.
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER` (`UPLOADER` cannot mark `fieldVerifications[].status = "VERIFIED"`) + CSRF.
+- **Request Body:** Optional `supplierId`/`documentId`, supplier/buyer snapshots (`supplierName`, `supplierGstin`, `buyerName`, `buyerGstin`, `placeOfSupplyCode`, `placeOfSupplyName`), `invoiceNumber`, `invoiceDate`, `dueDate`, `uploadDate`, `currency`, `isReverseCharge`, `sourceType`, `taxableAmount`, `discountAmount`, `discountMode`, `cgstAmount`, `sgstAmount`, `igstAmount`, `cessAmount`, `freightAmount`, `otherChargesAmount`, `roundOffAmount`, `totalAmount`, `reviewerNote`, `lineItems[]`, `fieldVerifications[]`.
+- **Response (`201 Created`):** Full `InvoiceDetailDto` including `taxAmount`, `financialYear`, `taxType`, server-computed `reconciliation` summary (`discrepancies[]`), `duplicateMatches[]`, sanitized `document` descriptor, `lineItems[]`, and `fieldVerifications[]`.
+- **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 WORKSPACE_NOT_FOUND`, `404 SUPPLIER_NOT_FOUND`, `404 DOCUMENT_NOT_FOUND`, `409 DOCUMENT_INFECTED`, `409 DOCUMENT_SCAN_FAILED`, `422 VALIDATION_ERROR`.
 
 ### `GET /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}`
-- **Purpose:** Retrieve complete invoice details for the Review Centre: header amounts, buyer/supplier snapshots, `lineItems[]`, `fieldVerifications[]`, open & historical `reviewFlags[]`, header & line-item reconciliation summaries, and document preview descriptor.
-- **Auth:** Any active workspace member.
-- **Response (`200 OK`):** Complete `InvoiceDetail` DTO.
+- **Purpose:** Retrieve complete active workspace invoice details: header amounts, buyer/supplier snapshots, `lineItems[]`, `fieldVerifications[]`, structured `reconciliation` (`computedExpectedTotal`, `varianceAmount`, `discrepancies[]`), dynamic `duplicateMatches[]`, `openFlagCount`, and sanitized `document` preview descriptor (never exposing `storageKey`). Returns `404 INVOICE_NOT_FOUND` for soft-deleted or foreign-workspace UUIDs.
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`.
+- **Response (`200 OK`):** Complete `InvoiceDetailDto`.
 
 ### `PATCH /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}`
-- **Purpose:** Save reviewer edits to invoice fields, line items, reviewer note, or individual field verification statuses. Recalculates `computedExpectedTotal`, `varianceAmount`, advisory `lineItemReconciliationStatus`/`lineItemWarning`, and advisory `duplicateWarning`. Never rejects due to arithmetic or line-item variance; editing a `VERIFIED` invoice requires reopening first (`409` otherwise).
+- **Purpose:** Save reviewer/uploader edits to invoice fields, replace `lineItems[]`, upsert `fieldVerifications[]`, or update `reviewerNote` under a row lock (`FOR UPDATE`). Recalculates `normalizedInvoiceNumber`, `reconciliation` summary, and advisory `duplicateWarning`/`duplicateMatches`. Rejects editing `VERIFIED` invoices (`409 VERIFIED_INVOICE_LOCKED`), restricts `UPLOADER` to `PENDING_REVIEW` invoices only (`403 FORBIDDEN_ROLE` on `FLAGGED` or `VERIFIED` field statuses), never rejects due to arithmetic variance, and emits `invoice.updated` audit event.
 - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER` (or `UPLOADER` while `status == 'PENDING_REVIEW'`) + CSRF.
-- **Response (`200 OK`):** Updated `InvoiceDetail` DTO.
-- **Errors:** `409 VERIFIED_INVOICE_LOCKED`.
+- **Response (`200 OK`):** Updated `InvoiceDetailDto`.
+- **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 INVOICE_NOT_FOUND`, `404 SUPPLIER_NOT_FOUND`, `404 DOCUMENT_NOT_FOUND`, `409 DOCUMENT_INFECTED`, `409 DOCUMENT_SCAN_FAILED`, `409 VERIFIED_INVOICE_LOCKED`, `422 VALIDATION_ERROR`.
 
 ### `DELETE /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}`
-- **Purpose:** Soft-delete (`deleted_at`, `deleted_by_user_id`, `deletion_reason`) an unverified `PENDING_REVIEW` or `FLAGGED` invoice while **preserving all `invoice_review_flags`, `review_actions`, and `audit_events` history**. **Never** permits deletion of `VERIFIED` invoices.
+- **Purpose:** Soft-delete (`deleted_at`, `deleted_by_user_id`, `deletion_reason`) an unverified `PENDING_REVIEW` or `FLAGGED` invoice while **preserving all `invoice_line_items`, `invoice_field_verifications`, `invoice_review_flags`, `review_actions`, and `audit_events` history**, and emitting an `invoice.soft_deleted` audit event. **Never** permits deletion of `VERIFIED` invoices (`409 CANNOT_DELETE_VERIFIED_INVOICE`).
 - **Auth:** `WORKSPACE_ADMIN` only + CSRF.
 - **Request Body (Optional):** `{ "deletionReason": "Duplicate test scan uploaded by mistake" }`
 - **Response (`204 No Content`)**
-- **Errors:** `403 FORBIDDEN_ROLE`, `409 CANNOT_DELETE_VERIFIED_INVOICE`.
+- **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 INVOICE_NOT_FOUND`, `409 CANNOT_DELETE_VERIFIED_INVOICE`.
 
 ---
 

@@ -3,7 +3,7 @@
 **Company:** NORUS AI  
 **Product:** NORUS BILLWISE  
 **Tagline:** *Beyond the World.*  
-**Stage:** Task 002.4H — Backend Foundations Verified Green Through Document Hardening (`b3e04609`; CI #22 Green, Task 002.5 Next)
+**Stage:** Task 002.5 — Invoices CRUD, Flexible Indian GST Reconciliation & Advisory Duplicate Detection (`389868fa` baseline; Task 002.6 Next)
 
 NORUS BILLWISE is an Invoice Intelligence and Verification Workspace built for Chartered Accountants, accounting firms, bookkeeping professionals, and business finance teams (initial target market: India; designed for global expansion).
 
@@ -18,7 +18,8 @@ NORUS BILLWISE is an Invoice Intelligence and Verification Workspace built for C
   - Organization/workspace provisioning, anti-enumeration organization invitations, organization & workspace memberships with role-based access control (`WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`), audit events, and mandatory `requireHumanReview = true` enforcement
   - **Suppliers Master API:** Workspace-scoped vendor CRUD (`GET`/`POST`/`PATCH`), GSTIN/PAN whitespace-before-length normalization, conflict handling, and SQL invoice aggregates
   - **Document Upload & Streaming (`LocalFilesystemStorage`):** Pure ASGI `16 MiB` pre-multipart upload cap, `15 MB` bounded chunk streaming, magic-byte signature validation, NUL-byte field validation, canonical path/symlink containment, `CLEAN`-only delivery (`FAILED`/`PENDING`/`SKIPPED_DEV` blocked with `409`, `INFECTED` with `403`), and inline PDF `Content-Security-Policy: sandbox`
-- **Not Implemented Yet (Task 002.5+):** Invoices CRUD & GST/line-item reconciliation endpoints, Human Review workflow endpoints (`/verify`, `/flag`, `/reopen`), backend Reporting/CSV export, live malware scanning & object storage (`S3`/`MinIO`), Frontend-to-Backend API wiring, OCR, and AI extraction.
+  - **Invoices & GST Reconciliation API (`GET`/`POST`/`GET {id}`/`PATCH`/`DELETE`):** Fixed-point `Decimal` Indian GST & line-item reconciliation (non-blocking variances, structured discrepancies), canonical invoice number normalization, advisory duplicate detection (`NORMALIZED_INVOICE_NUMBER` + `SIMILAR_TOTAL_WITHIN_45_DAYS`), relationship/scan-status gating (`INFECTED`/`FAILED` rejected `409`), `VERIFIED` edit/delete locking, `WORKSPACE_ADMIN` soft-delete preserving audit/review trails, and search/filter/sort pagination
+- **Not Implemented Yet (Task 002.6+):** Human Review workflow endpoints (`/verify`, `/flag`, `/flags/{flagId}/resolve`, `/reopen`), backend Reporting/CSV export, live malware scanning & object storage (`S3`/`MinIO`), Frontend-to-Backend API wiring, OCR, and AI extraction.
 
 ---
 

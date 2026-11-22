@@ -2,7 +2,7 @@
 
 **Database Engine:** PostgreSQL 16+  
 **ORM / Migration Tool:** SQLAlchemy 2.0 + Alembic  
-**Milestone:** Task 002.1A Schema Specification *(All 17 tables implemented in SQLAlchemy models & Alembic migrations `0001`–`0003`; Invoice/Review/Report endpoints pending Task 002.5–002.7)*
+**Milestone:** Task 002.5 Implemented on Unified 17-Table Schema *(All 17 tables active in SQLAlchemy models & Alembic migrations `0001`–`0003`; Auth, Tenancy/RBAC, Suppliers, Documents, and Invoices/GST Reconciliation implemented; Human Review & Reports endpoints pending Task 002.6–002.7)*
 
 ---
 
@@ -253,7 +253,7 @@
     - `place_of_supply_name VARCHAR(80) NULL`
   - **Document Metadata:**
     - `invoice_number VARCHAR(100) NOT NULL`
-    - `normalized_invoice_number VARCHAR(100) NOT NULL`
+    - `normalized_invoice_number VARCHAR(100) NOT NULL` (lowercased separator-normalized alphanumeric token string computed by `normalize_invoice_number`)
     - `invoice_date DATE NULL`
     - `due_date DATE NULL`
     - `upload_date DATE NOT NULL`

@@ -1,33 +1,30 @@
 # NEXT_TASK — Exact Next Recommended Development Task
 
-## Verified Baseline (`b3e0460959e996260a51f3c0e35673ee943640a4` — CI #22 Green)
+## Baseline & Checkpoint (`389868fa2213389609de8aaa8c5b7e67044ba47a` + Task 002.5)
 
-Remote `main` (`b3e0460959e996260a51f3c0e35673ee943640a4`) is **100% green** on GitHub Actions CI #22 (`45010488214`) for both `Frontend Lint, Test & Build (Node 22)` and `Backend Compilation, Pytest & PostgreSQL 16 Migrations`.
-
-*(Note: Apply the Task 002.4H cleanup PR removing `NORUS-TASK-002-4D.patch` and updating `docs/`, or start Task 002.5 directly on top of clean `main`.)*
+Remote `main` (`389868fa2213389609de8aaa8c5b7e67044ba47a`) is **100% green** on GitHub Actions (`45011666003`). Task 002.5 (Invoices CRUD, GST/line-item `Decimal` reconciliation engine, advisory duplicate detection, and `test_invoices.py`) is implemented locally and must pass CI (`pytest -v -ra` against PostgreSQL 16) before merging and starting Task 002.6.
 
 ---
 
-## Immediate Next Implementation Batch: NORUS BILLWISE TASK 002.5 — Invoices CRUD, Flexible Indian GST & Line-Item Reconciliation Engine, and Advisory Duplicate Detection
+## Immediate Next Implementation Batch: NORUS BILLWISE TASK 002.6 — Human Review Workflow, Exception Flags & Immutable Audit Ledger
 
 ### Objective
-Implement the core invoice lifecycle APIs on top of Task 002.4A (`suppliers`) and Task 002.4B/C (`documents`), delivering flexible GST & line-item reconciliation, advisory duplicate detection, strict RBAC/CSRF/tenant isolation, and mandatory human-review gating (never auto-verifying invoices).
+Implement the mandatory human-review sign-off endpoints on top of Task 002.5 (`invoices`), ensuring AI/uploader entries can never become `VERIFIED` without authorized human confirmation, unresolved arithmetic/line-item variances require explicit acknowledgment, and every decision writes to `review_actions` and `audit_events`.
 
 ### Deliverables
 
-1. **Invoice Schemas & Decimal Calculators (`backend/app/schemas/invoices.py`, `backend/app/services/reconciliation_service.py`)**
-   - Support list filtering/sorting/pagination (`GET /api/v1/workspaces/{workspaceId}/invoices`), manual/document-linked creation (`POST`, always initializing in `PENDING_REVIEW` and never `VERIFIED`), detail retrieval (`GET /{invoiceId}`), and partial updates (`PATCH /{invoiceId}`, locked against editing `VERIFIED` invoices unless reopened).
-   - Compute `computedExpectedTotal`, `varianceAmount`, `reconciliationStatus`, `lineItemsTaxableSum`, `lineItemVarianceAmount`, `lineItemReconciliationStatus`, and advisory `lineItemWarning` strictly with fixed-point `Decimal` math without ever rejecting an invoice upload/save for arithmetic variance.
-   - Verify any linked `supplierId` or `documentId` belongs to the exact same `workspaceId` (`404` on foreign references) and populate buyer/supplier snapshots safely.
-2. **Advisory Duplicate Warning Engine (`backend/app/services/invoice_service.py`)**
-   - Detect workspace-scoped active (`deleted_at IS NULL`) invoices sharing `(supplier_id, normalized_invoice_number)` or `(supplier_id, total_amount ± 0.01, invoice_date ± 45 days)` (respecting `WorkspaceSettings.enable_duplicate_warnings`) and surface advisory `duplicateWarning` for human review rather than silent rejection.
-3. **PostgreSQL 16 Integration Tests (`backend/tests/test_invoices.py`)**
-   - Cover GST intra/inter-state & `PRE_TAX`/`POST_TAX_COMMERCIAL` discount arithmetic, cess/freight/round-off handling, rounding tolerance, line-item variance advisories, duplicate warnings, `UPLOADER` edit restriction to `PENDING_REVIEW` only, `VERIFIED` lock (`409 VERIFIED_INVOICE_LOCKED`), soft-deleted invoice exclusion, CSRF, cross-tenant `supplierId`/`documentId` `404` isolation, and N+1 query bounds.
+1. **Human Review Endpoints (`backend/app/schemas/review.py`, `backend/app/services/review_service.py`, `backend/app/api/v1/review.py`)**
+   - `POST /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}/verify`: `WORKSPACE_ADMIN` and `REVIEWER` only (`UPLOADER` and `VIEWER` forbidden with `403`); rejects unacknowledged header or line-item variance (`409 VARIANCE_ACKNOWLEDGMENT_REQUIRED` unless `confirmVarianceAcknowledgment = true` with non-blank `confirmationNote`); sets `verified_by_user_id` and `verified_at`; resolves compatible open flags when `resolveOpenFlags = true`; records immutable `ReviewAction` and `AuditEvent`.
+   - `POST /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}/flag`: `WORKSPACE_ADMIN` and `REVIEWER` only; rejects blank `reasonText` (`422 EMPTY_FLAG_REASON`); creates `InvoiceReviewFlag`, sets `status = "FLAGGED"`, clears prior `verified_by_user_id`/`verified_at` if reopened/flagged, and logs `ReviewAction` + `AuditEvent`.
+   - `POST /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}/flags/{flagId}/resolve`: Resolves/dismisses an open flag with mandatory resolution note and optional transition back to `PENDING_REVIEW` when no open flags remain.
+   - `POST /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}/reopen`: Reopens a `VERIFIED` or `FLAGGED` invoice to `PENDING_REVIEW` with mandatory reason and immutable `ReviewAction` entry.
+   - `GET /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}/review-history`: Returns chronological `actions[]` and `flags[]` for authorized workspace members.
+2. **PostgreSQL 16 Integration Tests (`backend/tests/test_review.py`)**
+   - Verify variance acknowledgment gating (`409 VARIANCE_ACKNOWLEDGMENT_REQUIRED`), flag creation/resolution lifecycle, reopen unlocking for edits, `UPLOADER`/`VIEWER` `403` enforcement on review actions, CSRF, cross-workspace `404` isolation, and immutable `review_actions` + `audit_events` persistence.
 
 ---
 
 ## Subsequent Dependency-Ordered Batches Toward Pilot & Production
 
-- **Task 002.6 (Human Review Workflow):** Implement `/verify`, `/flag`, `/flags/{flagId}/resolve`, `/reopen`, `/review-history`, `WORKSPACE_ADMIN` soft-delete (`PENDING_REVIEW` / `FLAGGED` only; `409` on `VERIFIED`), mandatory variance confirmation (`confirmVarianceAcknowledgment`), immutable `review_actions` ledger, and `audit_events` emission.
 - **Task 002.7 (Reporting, CSV Export & Frontend API Integration):** Implement `/reports/summary`, `/monthly-trend`, `/exceptions`, formula-safe `/export.csv`, wire React `WorkspaceContext` to FastAPI (`credentials: 'include'` + `X-CSRF-Token`, sign-in/workspace switcher UI, removing mock-only dependency), and run full-stack Playwright + FastAPI verification.
 - **Pilot Security & Document Scan Readiness (Task 002.8):** Integrate ClamAV/malware scanning worker + scan-status transition flow (`PENDING -> CLEAN | INFECTED | FAILED`) so uploaded PDFs/images can safely stream in Review Centre, add upload/download rate limits, configure S3/MinIO `DocumentStorage` adapter + pilot HTTPS deployment hardening, and add email verification / password reset before onboarding external firms.
