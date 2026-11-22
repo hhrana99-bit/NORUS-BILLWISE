@@ -91,6 +91,15 @@ def _ensure_no_nul(value: str, *, field_label: str) -> str:
     return value
 
 
+def canonicalize_field_key(value: str, *, field_label: str = "fieldKey") -> str:
+    _ensure_no_nul(value, field_label=field_label)
+    cleaned = value.strip()
+    canonical = _FIELD_KEY_ALIASES.get(cleaned)
+    if canonical is None:
+        raise ValueError(f"Unsupported fieldKey: {cleaned!r}.")
+    return canonical
+
+
 def _clean_required_text(value: str, *, field_label: str) -> str:
     _ensure_no_nul(value, field_label=field_label)
     cleaned = " ".join(value.strip().split())
@@ -294,12 +303,9 @@ class InvoiceFieldVerificationInput(ApiModel):
     @field_validator("field_key")
     @classmethod
     def validate_field_key(cls, value: str) -> str:
-        _ensure_no_nul(value, field_label="fieldVerifications[].fieldKey")
-        cleaned = value.strip()
-        canonical = _FIELD_KEY_ALIASES.get(cleaned)
-        if canonical is None:
-            raise ValueError(f"Unsupported fieldKey: {cleaned!r}.")
-        return canonical
+        return canonicalize_field_key(
+            value, field_label="fieldVerifications[].fieldKey"
+        )
 
     @field_validator("evidence_note")
     @classmethod
@@ -874,10 +880,39 @@ class InvoiceSummaryDto(ApiModel):
         return f"{value:.2f}" if value is not None else None
 
 
+FlagCategory = Literal[
+    "ARITHMETIC_MISMATCH",
+    "DUPLICATE_SUSPICION",
+    "GSTIN_ISSUE",
+    "HSN_RATE_MISMATCH",
+    "MISSING_PO_GRN",
+    "FIELD_DISCREPANCY",
+    "CUSTOM",
+]
+FlagStatus = Literal["OPEN", "RESOLVED", "DISMISSED"]
+
+
+class InvoiceReviewFlagDto(ApiModel):
+    id: uuid.UUID
+    workspace_id: uuid.UUID
+    invoice_id: uuid.UUID
+    flag_category: str
+    reason_text: str
+    status: FlagStatus
+    created_by_user_id: uuid.UUID
+    created_by_name: str | None = None
+    resolved_by_user_id: uuid.UUID | None = None
+    resolved_by_name: str | None = None
+    resolution_note: str | None = None
+    created_at: datetime
+    resolved_at: datetime | None = None
+
+
 class InvoiceDetailDto(InvoiceSummaryDto):
     document: InvoiceDocumentDescriptorDto | None = None
     line_items: list[InvoiceLineItemDto] = Field(default_factory=list)
     field_verifications: list[InvoiceFieldVerificationDto] = Field(default_factory=list)
+    review_flags: list[InvoiceReviewFlagDto] = Field(default_factory=list)
     reconciliation: InvoiceReconciliationSummaryDto
     duplicate_matches: list[DuplicateMatchDto] = Field(default_factory=list)
 

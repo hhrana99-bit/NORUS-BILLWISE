@@ -7,6 +7,7 @@ from app.api.v1.documents import router as documents_router
 from app.api.v1.health import router as health_router
 from app.api.v1.invoices import router as invoices_router
 from app.api.v1.organizations import router as organizations_router
+from app.api.v1.review import router as review_router
 from app.api.v1.suppliers import router as suppliers_router
 from app.api.v1.workspaces import router as workspaces_router
 
@@ -18,4 +19,5 @@ api_v1_router.include_router(workspaces_router)
 api_v1_router.include_router(suppliers_router)
 api_v1_router.include_router(documents_router)
 api_v1_router.include_router(invoices_router)
+api_v1_router.include_router(review_router)
 

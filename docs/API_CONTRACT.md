@@ -2,7 +2,7 @@
 
 **API Prefix:** `/api/v1`  
 **Framework:** FastAPI + Pydantic v2  
-**Milestone:** Task 002.5 Implemented Invoices API *(Auth, Organizations/Workspaces/RBAC, Suppliers, Documents, and Invoices/GST Reconciliation implemented in Tasks 002.2–002.5; Human Review actions and Reports endpoints pending Task 002.6–002.7)*
+**Milestone:** Task 002.6 Implemented Human Review Workflow, Exception Flags & Audit Ledger *(Auth, Organizations/Workspaces/RBAC, Suppliers, Documents, Invoices/GST Reconciliation, and Human Review implemented in Tasks 002.2–002.6; Reports and Frontend API integration pending Task 002.7)*
 
 ---
 
@@ -300,12 +300,12 @@
 - **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 WORKSPACE_NOT_FOUND`, `404 SUPPLIER_NOT_FOUND`, `404 DOCUMENT_NOT_FOUND`, `409 DOCUMENT_INFECTED`, `409 DOCUMENT_SCAN_FAILED`, `422 VALIDATION_ERROR`.
 
 ### `GET /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}`
-- **Purpose:** Retrieve complete active workspace invoice details: header amounts, buyer/supplier snapshots, `lineItems[]`, `fieldVerifications[]`, structured `reconciliation` (`computedExpectedTotal`, `varianceAmount`, `discrepancies[]`), dynamic `duplicateMatches[]`, `openFlagCount`, and sanitized `document` preview descriptor (never exposing `storageKey`). Returns `404 INVOICE_NOT_FOUND` for soft-deleted or foreign-workspace UUIDs.
+- **Purpose:** Retrieve complete active workspace invoice details: header amounts, buyer/supplier snapshots, `lineItems[]`, `fieldVerifications[]`, chronologically sorted `reviewFlags[]`, structured `reconciliation` (`computedExpectedTotal`, `varianceAmount`, `discrepancies[]`), dynamic `duplicateMatches[]`, `openFlagCount`, and sanitized `document` preview descriptor (never exposing `storageKey`). Returns `404 INVOICE_NOT_FOUND` for soft-deleted or foreign-workspace UUIDs.
 - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`.
 - **Response (`200 OK`):** Complete `InvoiceDetailDto`.
 
 ### `PATCH /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}`
-- **Purpose:** Save reviewer/uploader edits to invoice fields, replace `lineItems[]`, upsert `fieldVerifications[]`, or update `reviewerNote` under a row lock (`FOR UPDATE`). Recalculates `normalizedInvoiceNumber`, `reconciliation` summary, and advisory `duplicateWarning`/`duplicateMatches`. Rejects editing `VERIFIED` invoices (`409 VERIFIED_INVOICE_LOCKED`), restricts `UPLOADER` to `PENDING_REVIEW` invoices only (`403 FORBIDDEN_ROLE` on `FLAGGED` or `VERIFIED` field statuses), never rejects due to arithmetic variance, and emits `invoice.updated` audit event.
+- **Purpose:** Save reviewer/uploader edits to invoice fields, replace `lineItems[]`, upsert `fieldVerifications[]`, or update `reviewerNote` under a row lock (`FOR UPDATE`). Recalculates `normalizedInvoiceNumber`, `reconciliation` summary, and advisory `duplicateWarning`/`duplicateMatches`. Rejects editing `VERIFIED` invoices (`409 VERIFIED_INVOICE_LOCKED`), restricts `UPLOADER` to `PENDING_REVIEW` invoices only (`403 FORBIDDEN_ROLE` on `FLAGGED` or `VERIFIED` field statuses), never rejects due to arithmetic variance, and records both a `ReviewAction(actionType="SAVE_EDITS")` ledger entry and an `invoice.updated` audit event.
 - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER` (or `UPLOADER` while `status == 'PENDING_REVIEW'`) + CSRF.
 - **Response (`200 OK`):** Updated `InvoiceDetailDto`.
 - **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 INVOICE_NOT_FOUND`, `404 SUPPLIER_NOT_FOUND`, `404 DOCUMENT_NOT_FOUND`, `409 DOCUMENT_INFECTED`, `409 DOCUMENT_SCAN_FAILED`, `409 VERIFIED_INVOICE_LOCKED`, `422 VALIDATION_ERROR`.
@@ -322,50 +322,64 @@
 ## 7. Invoice Review & Flag Endpoints
 
 ### `POST /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}/verify`
-- **Purpose:** Human sign-off transitioning an invoice to `VERIFIED`. Records an immutable `review_actions` entry and resolves compatible open flags if requested.
-- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER` only (`UPLOADER` and `VIEWER` forbidden) + CSRF.
+- **Purpose:** Mandatory human sign-off transitioning an unverified invoice to `VERIFIED` under a `FOR UPDATE` row lock. Server sets `verifiedByUserId` and `verifiedAt` strictly from the authenticated actor and UTC clock (`extra="forbid"` blocks client tampering). Verifies required invoice fields (no placeholder supplier/draft number/missing date/zero-pending total) and requires any tracked `fieldVerifications` (or submitted `fieldVerifications` with `status: "VERIFIED"`) to be `VERIFIED`. Recomputes GST/line-item reconciliation before sign-off and records an immutable `ReviewAction` (`MARK_VERIFIED` or `VERIFY_WITH_VARIANCE`) plus `invoice.verified` audit event. If `resolveOpenFlags` is `true`, atomically resolves all `OPEN` flags with `flagResolutionNote` (or `confirmationNote`) and logs `RESOLVE_FLAG` actions first.
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER` only (`UPLOADER` and `VIEWER` forbidden with `403`) + CSRF (`Origin`/`Referer` + `X-CSRF-Token`).
 - **Request Body:**
   ```json
   {
     "confirmVarianceAcknowledgment": true,
     "confirmationNote": "Confirmed ₹1,000.00 un-itemized pallet surcharge on scanned copy.",
-    "resolveOpenFlags": true
+    "resolveOpenFlags": true,
+    "flagResolutionNote": "Verified GSTIN against portal printout.",
+    "fieldVerifications": [
+      { "fieldKey": "totalAmount", "status": "VERIFIED", "sourcePage": 1 }
+    ]
   }
   ```
-- **Response (`200 OK`):** Updated `InvoiceDetail` DTO (`status: "VERIFIED"`, `verifiedBy`, `verifiedAt`).
+- **Response (`200 OK`):** Updated `InvoiceDetailDto` (`status: "VERIFIED"`, `verifiedByUserId`, `verifiedAt`, `reviewFlags[]`).
 - **Errors:**
-  - `409 VARIANCE_ACKNOWLEDGMENT_REQUIRED` (returned whenever header `abs(varianceAmount) > roundingTolerance` **or** `lineItemReconciliationStatus == "VARIANCE_WARNING"` and `confirmVarianceAcknowledgment` is false or `confirmationNote` is blank).
-  - `422 INVALID_FLAG_RESOLUTION`.
+  - `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 WORKSPACE_NOT_FOUND`, `404 INVOICE_NOT_FOUND`
+  - `409 INVOICE_ALREADY_VERIFIED`
+  - `409 UNRESOLVED_REVIEW_FLAGS` (when `OPEN` flags exist and `resolveOpenFlags` is `false`)
+  - `409 MISSING_REQUIRED_FIELD_VERIFICATION` (missing mandatory invoice fields or unverified `fieldVerifications`)
+  - `409 VARIANCE_ACKNOWLEDGMENT_REQUIRED` (returned whenever header `abs(varianceAmount) > roundingTolerance` **or** `lineItemReconciliationStatus == "VARIANCE_WARNING"` and `confirmVarianceAcknowledgment` is `false` or `confirmationNote` is blank)
+  - `422 INVALID_FLAG_RESOLUTION`, `422 INVALID_FIELD_VERIFICATION_STATUS`, `422 HUMAN_REVIEW_CANNOT_BE_DISABLED`, `422 VALIDATION_ERROR`.
 
 ### `POST /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}/flag`
-- **Purpose:** Hold an invoice (`status = 'FLAGGED'`) and create an `invoice_review_flags` row plus `review_actions` entry.
+- **Purpose:** Hold an active invoice (`status = 'FLAGGED'`, clearing `verifiedByUserId`/`verifiedAt` if previously verified), create an `OPEN` `invoice_review_flags` row, optionally mark a referenced `fieldKey` in `invoice_field_verifications` as `FLAGGED`, and atomically record an immutable `ReviewAction` (`FLAG_INVOICE`) and `invoice.flagged` audit event.
 - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER` + CSRF.
 - **Request Body:**
   ```json
   {
     "flagCategory": "ARITHMETIC_MISMATCH",
-    "reasonText": "Tax / total arithmetic mismatch — Freight omitted from GST base"
+    "reasonText": "Tax / total arithmetic mismatch — Freight omitted from GST base",
+    "fieldKey": "totalAmount"
   }
   ```
-- **Response (`200 OK`):** Updated `InvoiceDetail` DTO with new `invoice_review_flags` record.
-- **Errors:** `422 EMPTY_FLAG_REASON` (rejects empty/whitespace `reasonText`).
+  *(Accepted `flagCategory` values: `ARITHMETIC_MISMATCH`, `DUPLICATE_SUSPICION`, `GSTIN_ISSUE`, `HSN_RATE_MISMATCH`, `MISSING_PO_GRN`, `FIELD_DISCREPANCY`, `CUSTOM`.)*
+- **Response (`200 OK`):** Updated `InvoiceDetailDto` with chronologically ordered `reviewFlags[]`.
+- **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 INVOICE_NOT_FOUND`, `422 EMPTY_FLAG_REASON` (blank/whitespace `reasonText`), `422 VALIDATION_ERROR`.
 
-### `POST /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}/flags/{flagId}/resolve`
-- **Purpose:** Mark an open review flag as `RESOLVED` or `DISMISSED` with a mandatory resolution note; optionally transitions invoice back to `PENDING_REVIEW` if no open flags remain.
+### `POST /api/v1/workspaces/{workspaceId}/flags/{flagId}/resolve`
+- **Purpose:** Mark an `OPEN` workspace review flag as `RESOLVED` or `DISMISSED` with a mandatory non-blank `resolutionNote` under canonical `Invoice -> InvoiceReviewFlag` `FOR UPDATE` lock ordering. Transitions invoice status back to `PENDING_REVIEW` only if `remainingOpenFlags == 0`, `invoice.status == 'FLAGGED'`, and `reopenToPending == true` (default `true`). Preserves all historical flags and records `ReviewAction` (`RESOLVE_FLAG`) + `invoice.flag_resolved` audit event.
 - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER` + CSRF.
 - **Request Body:** `{ "resolutionStatus": "RESOLVED", "resolutionNote": "...", "reopenToPending": true }`
-- **Response (`200 OK`):** Updated flag + invoice status summary.
+- **Response (`200 OK`):** `{ "flag": InvoiceReviewFlagDto, "invoiceId": "uuid", "invoiceStatus": "PENDING_REVIEW", "openFlagCount": 0 }`.
+- **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 FLAG_NOT_FOUND`, `404 INVOICE_NOT_FOUND`, `409 FLAG_ALREADY_RESOLVED`, `422 INVALID_FLAG_RESOLUTION`, `422 VALIDATION_ERROR`.
 
 ### `POST /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}/reopen`
-- **Purpose:** Reopen a `VERIFIED` or `FLAGGED` invoice to `PENDING_REVIEW` for re-editing, logging an immutable `review_actions` row.
+- **Purpose:** Reopen a `VERIFIED` (or flag-cleared `FLAGGED`) invoice back to `PENDING_REVIEW` (`verifiedByUserId = null`, `verifiedAt = null`), unlocking edits while preserving all prior `review_flags`, `review_actions`, and `audit_events` and appending `ReviewAction(actionType="REOPEN_PENDING")` + `invoice.reopened` audit event. Rejects invoices already in `PENDING_REVIEW` (`409 INVALID_INVOICE_STATE_TRANSITION`) or `FLAGGED` with remaining `OPEN` flags (`409 UNRESOLVED_REVIEW_FLAGS`).
 - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER` + CSRF.
 - **Request Body:** `{ "reason": "Supplier issued credit note / revised GSTIN" }`
-- **Response (`200 OK`):** Updated `InvoiceDetail` DTO.
+- **Response (`200 OK`):** Updated `InvoiceDetailDto`.
+- **Errors:** `401 UNAUTHENTICATED`, `403 CSRF_TOKEN_INVALID`, `403 FORBIDDEN_ROLE`, `404 INVOICE_NOT_FOUND`, `409 INVALID_INVOICE_STATE_TRANSITION`, `409 UNRESOLVED_REVIEW_FLAGS`, `422 REOPEN_REASON_REQUIRED`, `422 VALIDATION_ERROR`.
 
 ### `GET /api/v1/workspaces/{workspaceId}/invoices/{invoiceId}/review-history`
-- **Purpose:** Return chronological `review_actions` and `invoice_review_flags` for a specific invoice (remains readable for audit purposes).
-- **Auth:** Any active workspace member.
-- **Response (`200 OK`):** `{ "actions": [...], "flags": [...] }`.
+- **Purpose:** Return chronological (`order=asc|desc`, default `asc`), paginated immutable `review_actions[]`, all `reviewFlags[]`, and sanitized invoice `auditEvents[]` (`ipAddress` is omitted). Remains readable within the authorized workspace even after an unverified invoice is soft-deleted, while rejecting foreign-workspace UUIDs with `404`.
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`.
+- **Query Params:** `order` (`asc|desc`, default `asc`), `page` (`>= 1`, default `1`), `pageSize` (`1..100`, default `50`).
+- **Response (`200 OK`):** `{ "invoiceId": "uuid", "status": "PENDING_REVIEW", "actions": [ReviewActionDto...], "flags": [InvoiceReviewFlagDto...], "auditEvents": [ReviewAuditEventDto...], "totalActions": 5, "totalFlags": 2, "totalAuditEvents": 5, "page": 1, "pageSize": 50 }`.
+- **Errors:** `401 UNAUTHENTICATED`, `404 WORKSPACE_NOT_FOUND`, `404 INVOICE_NOT_FOUND`, `422 VALIDATION_ERROR`.
 
 ---
 

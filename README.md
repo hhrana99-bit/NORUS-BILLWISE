@@ -3,7 +3,7 @@
 **Company:** NORUS AI  
 **Product:** NORUS BILLWISE  
 **Tagline:** *Beyond the World.*  
-**Stage:** Task 002.5 — Invoices CRUD, Flexible Indian GST Reconciliation & Advisory Duplicate Detection (`389868fa` baseline; Task 002.6 Next)
+**Stage:** Task 002.6 — Human Review Workflow, Exception Flags & Immutable Audit Ledger (`bfa17947` baseline; Task 002.7 Next)
 
 NORUS BILLWISE is an Invoice Intelligence and Verification Workspace built for Chartered Accountants, accounting firms, bookkeeping professionals, and business finance teams (initial target market: India; designed for global expansion).
 
@@ -19,7 +19,8 @@ NORUS BILLWISE is an Invoice Intelligence and Verification Workspace built for C
   - **Suppliers Master API:** Workspace-scoped vendor CRUD (`GET`/`POST`/`PATCH`), GSTIN/PAN whitespace-before-length normalization, conflict handling, and SQL invoice aggregates
   - **Document Upload & Streaming (`LocalFilesystemStorage`):** Pure ASGI `16 MiB` pre-multipart upload cap, `15 MB` bounded chunk streaming, magic-byte signature validation, NUL-byte field validation, canonical path/symlink containment, `CLEAN`-only delivery (`FAILED`/`PENDING`/`SKIPPED_DEV` blocked with `409`, `INFECTED` with `403`), and inline PDF `Content-Security-Policy: sandbox`
   - **Invoices & GST Reconciliation API (`GET`/`POST`/`GET {id}`/`PATCH`/`DELETE`):** Fixed-point `Decimal` Indian GST & line-item reconciliation (non-blocking variances, structured discrepancies), canonical invoice number normalization, advisory duplicate detection (`NORMALIZED_INVOICE_NUMBER` + `SIMILAR_TOTAL_WITHIN_45_DAYS`), relationship/scan-status gating (`INFECTED`/`FAILED` rejected `409`), `VERIFIED` edit/delete locking, `WORKSPACE_ADMIN` soft-delete preserving audit/review trails, and search/filter/sort pagination
-- **Not Implemented Yet (Task 002.6+):** Human Review workflow endpoints (`/verify`, `/flag`, `/flags/{flagId}/resolve`, `/reopen`), backend Reporting/CSV export, live malware scanning & object storage (`S3`/`MinIO`), Frontend-to-Backend API wiring, OCR, and AI extraction.
+  - **Human Review Workflow & Immutable Audit Ledger (`/verify`, `/flag`, `/flags/{flagId}/resolve`, `/reopen`, `/review-history`):** Mandatory human verification (`WORKSPACE_ADMIN`, `REVIEWER` only), required field and header/line-item variance confirmation (`409 VARIANCE_ACKNOWLEDGMENT_REQUIRED`), exception flag lifecycle preserving resolved history, verified invoice reopen workflow, `SELECT ... FOR UPDATE` concurrency safety, and chronological/paginated immutable `review_actions` + sanitized `audit_events` history
+- **Not Implemented Yet (Task 002.7+):** Backend Reporting/CSV export, Frontend-to-Backend API wiring, live malware scanning & object storage (`S3`/`MinIO`), OCR, and AI extraction.
 
 ---
 

@@ -1,35 +1,36 @@
 # STATUS — Project Progress
 
-**Current Milestone:** Task 002.5A — Invoice Engine Validation, Regression Audit & Stabilization (built on `main` `606ac011`)
-**Status:** Verified Remote `main` (`606ac011d2615735f23e8eaa9b086c52935a3f2a`, Task 002.5 already committed); GitHub Actions CI #24 (`45014078164`) passed Frontend and Alembic upgrade but failed in `pytest`; Task 002.5A fixes applied locally (`compileall` + Frontend Passing; Live `pytest`/PostgreSQL 16 Execution `BLOCKED` Locally)
+**Current Milestone:** Task 002.6 — Human Review Workflow, Exception Flags & Immutable Audit Ledger (built on `main` `bfa17947`)
+**Status:** Verified Remote `main` (`bfa179475c087eb5d7f7d305b6b69a5f481c96b3`, CI #25 `45015052231` green across Frontend + Python 3.12 + PostgreSQL 16); Task 002.6 implemented locally (`compileall` + Frontend Passing; Live `pytest`/PostgreSQL 16 Execution `BLOCKED` Locally)
 
 ---
 
-## Completed Work in Task 002.5 / 002.5A (`606ac011` + Stabilization Patch)
+## Completed Work in Task 002.6 (`bfa17947` + Human Review Patch)
 
-1. **Dedicated `Decimal` GST & Line-Item Reconciliation Engine (`backend/app/services/reconciliation_service.py`)**
-   - Deterministic `Decimal` (`ROUND_HALF_UP`) calculation of `computedExpectedTotal`, `varianceAmount`, `reconciliationStatus` (`PENDING_INPUT`, `MATCHED`, `WITHIN_ROUNDING_TOLERANCE`, `VARIANCE_DETECTED`), `lineItemsTaxableSum`, `lineItemVarianceAmount`, `lineItemReconciliationStatus` (`NO_LINE_ITEMS`, `MATCHED`, `VARIANCE_WARNING`), and structured advisory `discrepancies[]` (`MIXED_TAX_REGIME`, `CGST_SGST_ASYMMETRY`, `REGIME_STATE_MISMATCH`, `LINE_ITEM_MATH_VARIANCE`, `LINE_ITEM_TAX_SUM_MISMATCH`, `REVERSE_CHARGE_TAX_CHECK`, `SUPPLIER_GSTIN_FORMAT`, `EXCESSIVE_ROUND_OFF`).
-   - Shared `normalize_invoice_number` formatter invariance (`INV/2026-27/001` == `inv-2026-27-001` while keeping `10-1` != `1-01`) reused by `document_service.py`, plus Indian April–March financial year helpers.
-2. **Workspace-Scoped Invoices API & Advisory Duplicate Detection (`backend/app/schemas/invoices.py`, `backend/app/services/invoice_service.py`, `backend/app/api/v1/invoices.py`)**
-   - Implemented `GET /invoices` (escaped LIKE search, filters including `taxType`, `reconciliationStatus`, `lineItemReconciliationStatus`, `financialYear`, `dateFrom`..`dateTo`, sorting, pagination, zero N+1 query overhead), `POST /invoices` (always starts `PENDING_REVIEW`, `extra="forbid"`), `GET /invoices/{invoiceId}`, `PATCH /invoices/{invoiceId}` (`FOR UPDATE`, `VERIFIED` lock `409 VERIFIED_INVOICE_LOCKED`, `UPLOADER` `PENDING_REVIEW`-only restriction), and `DELETE /invoices/{invoiceId}` (`WORKSPACE_ADMIN` soft-delete on unverified invoices preserving child line items, flags, review actions, and audit logs).
-   - Validated workspace ownership (`404` on cross-workspace `supplierId`/`documentId`) and document scan gating (`409 DOCUMENT_INFECTED` / `409 DOCUMENT_SCAN_FAILED`).
-   - Implemented advisory duplicate warnings scoped to active workspace invoices (`NORMALIZED_INVOICE_NUMBER` within same Indian FY/180 days; `SIMILAR_TOTAL_WITHIN_45_DAYS` within `±₹0.01`), respecting `WorkspaceSettings.enable_duplicate_warnings`.
-3. **Task 002.5A Audit & CI Failure Fixes (`backend/app/schemas/invoices.py`, `backend/app/services/invoice_service.py`, `backend/tests/test_invoices.py`)**
-   - Fixed `InvoiceFieldVerificationInput.validate_field_key` to accept both `camelCase` (`totalAmount`, `cgst`, `sgst`, `igst`, etc.) and canonical `snake_case` (`total_amount`, `cgst_amount`, etc.) field keys and normalize to canonical DB `field_key` values (preventing HTTP `422` failures in `test_invoices.py` PATCH/RBAC tests).
-   - Fixed `detect_advisory_duplicates` zero-total draft exclusion so `DRAFT-<8hex>` UUID prefixes starting with `0-9` (normalized to `draft<8hex>` without hyphen) are excluded consistently alongside `draft-*`.
-   - Added unit test assertions in `backend/tests/test_invoices.py` for camelCase/snake_case `fieldKey` normalization and duplicate-alias detection.
+1. **Human Review Schemas & Validation Error Mapping (`backend/app/schemas/review.py`, `backend/app/schemas/invoices.py`, `backend/app/core/errors.py`)**
+   - Added strict `ApiModel` (`extra="forbid"`) payloads `VerifyInvoiceRequest`, `FlagInvoiceRequest`, `ResolveFlagRequest`, and `ReopenInvoiceRequest`, rejecting server-managed fields (`status`, `verifiedByUserId`, `verifiedAt`, `workspaceId`) and mapping blank validation markers to contract codes (`EMPTY_FLAG_REASON`, `INVALID_FLAG_RESOLUTION`, `REOPEN_REASON_REQUIRED`).
+   - Added `InvoiceReviewFlagDto` (wired into `InvoiceDetailDto.reviewFlags`), `ResolveFlagResponse`, `ReviewActionDto` (fixed 2-decimal `varianceAmountAtAction`), sanitized `ReviewAuditEventDto` (omitting `ipAddress`), and `ReviewHistoryResponse`; extracted shared `canonicalize_field_key` in `schemas/invoices.py`.
+2. **Human Review Service & Mandatory Sign-Off Gate (`backend/app/services/review_service.py`, `backend/app/services/invoice_service.py`)**
+   - Implemented `verify_invoice`, `flag_invoice`, `resolve_review_flag`, `reopen_invoice`, and `get_invoice_review_history` using PostgreSQL `SELECT ... FOR UPDATE` with canonical `Invoice -> InvoiceReviewFlag` lock ordering across all endpoints to prevent deadlocks.
+   - Enforced mandatory human verification (`WORKSPACE_ADMIN`, `REVIEWER` only), mandatory header and tracked `fieldVerifications` completeness (`409 MISSING_REQUIRED_FIELD_VERIFICATION`), explicit `409 VARIANCE_ACKNOWLEDGMENT_REQUIRED` when header or line-item reconciliation variances exist without acknowledgment + non-blank note, open-flag verification gating (`409 UNRESOLVED_REVIEW_FLAGS` or atomic `resolveOpenFlags` resolution), and `HUMAN_REVIEW_CANNOT_BE_DISABLED` guardrails.
+   - Added immutable `ReviewAction(actionType="SAVE_EDITS")` logging inside `invoice_service.update_invoice`, preserved resolved flags/actions/audit logs across reopens and soft deletes, and kept `review-history` strictly read-only and chronologically paginated.
+3. **Human Review Router & Automated Tests (`backend/app/api/v1/review.py`, `backend/app/api/v1/invoices.py`, `backend/app/api/v1/__init__.py`, `backend/tests/test_review.py`, `backend/tests/test_invoices.py`)**
+   - Mounted all 5 `/workspaces/{workspaceId}/...` review routes (`POST .../verify`, `POST .../flag`, `POST .../flags/{flagId}/resolve`, `POST .../reopen`, `GET .../review-history`) with `require_csrf` on every mutation and strict RBAC + `404` tenant isolation.
+   - Confirmed no Alembic schema migration is needed (existing migrations `0001`–`0003` already enforce `invoice_review_flags`, `review_actions`, `audit_events`, and composite RESTRICT foreign keys).
+   - Added comprehensive offline unit and PostgreSQL 16 integration/concurrency tests in `backend/tests/test_review.py` plus the Task 002.5 zero-total draft-placeholder non-collision PostgreSQL regression test in `backend/tests/test_invoices.py`.
 
 ---
 
-## Prior Completed Work on `main` (`606ac011` and earlier)
+## Prior Completed Work on `main` (`bfa17947` and earlier)
 
-- **Task 002.5 (`389868fa` → `606ac011`):** Invoices CRUD, `Decimal` GST reconciliation, advisory duplicate detection, and `test_invoices.py` merged onto `main` (Frontend CI green; Backend pytest step failed in CI #24 `45014078164`).
-- **Task 002.4H (`b3e04609` → `389868fa`):** Removed obsolete root patch `NORUS-TASK-002-4D.patch`, aligned milestone docs, and confirmed CI `45011666003` green on `main`.
+- **Task 002.5A (`606ac011` → `bfa17947`):** Fixed `fieldKey` camelCase normalization and `DRAFT-<8hex>` placeholder duplicate matching; verified completely green on GitHub Actions CI #25 (`45015052231`).
+- **Task 002.5 (`389868fa` → `606ac011`):** Dedicated `Decimal` Indian GST & line-item reconciliation engine, advisory duplicate detection, and workspace-scoped Invoices CRUD/search/filter/sort API.
+- **Task 002.4H (`b3e04609` → `389868fa`):** Removed obsolete root patch `NORUS-TASK-002-4D.patch` and aligned milestone docs (`CI #23` `45011666003` green).
 - **Task 002.4G (`b3e04609`):** Fixed case-sensitive regex assertion in `test_settings_rejects_blank_document_storage_root` (`CI #22` `45010488214` green).
-- **Task 002.4D (`a793a7f9` → `f7cd90c4`):** `status.HTTP_413_REQUEST_ENTITY_TOO_LARGE` Starlette compatibility fix in `backend/app/main.py` and `backend/app/services/storage_service.py`, plus `task-002-4c.patch` removal.
-- **Task 002.4C (`1adcbdcd`):** Migration `0003_doc_failed_scan_status` (`FAILED` scan status), pure ASGI `RequestIdMiddleware` & `DocumentUploadSizeLimitMiddleware` (`16 MiB` pre-multipart limit), inline PDF `Content-Security-Policy: sandbox`, and pre-storage `\x00` NUL-byte validation on `supplierName`/`invoiceNumber`.
-- **Task 002.4B (`e255af40`):** Pluggable `DocumentStorage` + `LocalFilesystemStorage` (UUID keys, canonical path & symlink containment, `15 MB` streaming cap, magic-byte validation, optional draft invoice staging, `CLEAN`-only content streaming).
-- **Task 002.4A (`c0c0b615` + `fa89175a`):** Suppliers Master API (`GET`/`POST`/`PATCH` `/suppliers`, GSTIN/PAN whitespace trimming before max-length validation, `FOR UPDATE` + `IntegrityError` handling, SQL invoice aggregates, RBAC, CSRF, audit events).
+- **Task 002.4D (`a793a7f9` → `f7cd90c4`):** `status.HTTP_413_REQUEST_ENTITY_TOO_LARGE` Starlette compatibility fix and `task-002-4c.patch` removal.
+- **Task 002.4C (`1adcbdcd`):** Migration `0003_doc_failed_scan_status`, pure ASGI `RequestIdMiddleware` & `DocumentUploadSizeLimitMiddleware` (`16 MiB`), inline PDF `Content-Security-Policy: sandbox`, and pre-storage NUL validation.
+- **Task 002.4B (`e255af40`):** Pluggable `DocumentStorage` + `LocalFilesystemStorage` (UUID keys, canonical path & symlink containment, `15 MB` cap, magic-byte validation, `CLEAN`-only streaming).
+- **Task 002.4A (`c0c0b615` + `fa89175a`):** Suppliers Master API (`GET`/`POST`/`PATCH` `/suppliers`, GSTIN/PAN normalization, SQL aggregates, RBAC, CSRF, audit events).
 - **Task 002.3 (`125857a` / `a873fcb`):** Auth/session/CSRF/RBAC foundation with Argon2id, `HttpOnly`/`SameSite=Lax` cookies, rotating refresh token families, PostgreSQL rate limiting, and anti-enumeration invitations.
 - **Task 001 – 002.2B:** React 19 + TypeScript + Tailwind CSS v4 frontend SPA and FastAPI modular monolith foundation.
 
@@ -37,12 +38,11 @@
 
 ## Implemented vs. Deferred & MVP-Readiness Boundary
 
-- **Locally Executed & Passing (Container):** Python bytecode compilation (`python3 -m compileall -q backend/app backend/alembic backend/tests`) and React frontend (`npm run lint`, `npm test`, `npm run build`).
-- **Locally Blocked:** Live `pytest` execution (including `backend/tests/test_invoices.py`) and PostgreSQL 16 migration/integration verification remain `BLOCKED` inside this container due to absent Python 3.12, backend dependencies, and PostgreSQL 16; must run on a feature branch in GitHub Actions CI before starting Task 002.6.
+- **Locally Executed & Passing (Container):** Python bytecode compilation (`python3 -m compileall -q backend/app backend/alembic backend/tests`), AST unused-import check, and React frontend (`npm run lint`, `npm test`, `npm run build`).
+- **Locally Blocked:** Live `pytest` execution (including `backend/tests/test_review.py` and `backend/tests/test_invoices.py`) and PostgreSQL 16 integration/concurrency verification remain `BLOCKED` inside this container due to absent Python 3.12, backend dependencies, and PostgreSQL 16; must run on a feature branch in GitHub Actions CI before merging or starting Task 002.7.
 - **A. Required Before Controlled Accounting-Firm Pilot:**
-  - **Task 002.6 (After Green Task 002.5 CI):** Human Review workflow endpoints (`/verify`, `/flag`, `/flags/{flagId}/resolve`, `/reopen`, `/review-history`, mandatory variance acknowledgment, immutable `review_actions` & `audit_events`).
-  - **Task 002.7:** Backend Reports API (`/summary`, `/monthly-trend`, `/exceptions`, `/export.csv`) and Frontend `WorkspaceContext` API integration (`credentials: 'include'` + `X-CSRF-Token`, auth/workspace UI).
-  - **Document Scan & Pilot Storage Readiness:** Wire real malware scanning (e.g., ClamAV async/inline worker) or a controlled non-production `CLEAN` transition gate so uploaded PDFs/images become streamable during pilot review, plus pilot HTTPS deployment config (`COOKIE_SECURE=true`, production `CORS_ORIGINS`, `TRUSTED_PROXIES`, persistent volume/object storage).
+  - **Task 002.7 (After Green Task 002.6 CI):** Backend Reports & CSV Export API (`/reports/summary`, `/monthly-trend`, `/exceptions`, `/export.csv` with formula neutralization) and Frontend `WorkspaceContext` API integration (`credentials: 'include'` + `X-CSRF-Token`, sign-in/workspace switcher UI, end-to-end Playwright + FastAPI verification).
+  - **Task 002.8 (Document Scan & Pilot Storage Readiness):** Wire real malware scanning (e.g., ClamAV async/inline worker) or controlled scan transition flow (`PENDING -> CLEAN | INFECTED | FAILED`) so uploaded PDFs/images become streamable during pilot review, plus pilot HTTPS deployment config (`COOKIE_SECURE=true`, production `CORS_ORIGINS`, `TRUSTED_PROXIES`, persistent volume/object storage).
 - **B. Required Before Production Deployment:**
   - Encrypted S3/MinIO `DocumentStorage` adapter + lifecycle orphan-blob cleanup, mandatory ClamAV malware scanning pipeline, upload/stream rate limits & workspace storage quotas, automated PostgreSQL backups + PITR restore drills, email verification & password-reset flows, data retention/deletion workflows, and structured monitoring/alerting.
 - **C. Later Releases (Post-MVP):**

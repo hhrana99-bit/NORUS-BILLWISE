@@ -2,8 +2,8 @@
 
 **Company:** NORUS AI  
 **Product:** NORUS BILLWISE (*Beyond the World.*)  
-**Milestone:** Task 002.5 Implemented Invoices & GST Reconciliation *(Tasks 002.2–002.5 implemented for Auth, Tenancy/RBAC, Suppliers, Document Storage, and Invoices/Reconciliation; Human Review actions, Reports, Frontend API wiring, and S3/ClamAV remain pending)*  
-**Document Status:** Task 002.5 Milestone (based on verified `main` `389868fa`; see `docs/STATUS.md` for live progress)
+**Milestone:** Task 002.6 Implemented Human Review Workflow, Exception Flags & Immutable Audit Ledger *(Tasks 002.2–002.6 implemented for Auth, Tenancy/RBAC, Suppliers, Document Storage, Invoices/Reconciliation, and Human Review Workflow; Reports, Frontend API wiring, and S3/ClamAV remain pending)*  
+**Document Status:** Task 002.6 Milestone (based on verified `main` `bfa17947`; see `docs/STATUS.md` for live progress)
 
 ---
 
@@ -95,10 +95,11 @@ NORUS BILLWISE targets a **cleanly layered Python FastAPI modular monolith** bac
 2. **Document Staging & Invoice Creation:**
    - User uploads a PDF/PNG/JPG/WEBP via `POST /api/v1/workspaces/{workspaceId}/documents`.
    - FastAPI validates MIME type, magic bytes, and size, computes SHA-256 checksum, stores the binary via `DocumentStorage` under a generated UUID object key (`orgs/{org_id}/workspaces/{ws_id}/{doc_id}`), inserts a `documents` row, creates a linked `invoices` draft (`status = 'PENDING_REVIEW'`), runs duplicate detection (`DuplicateService`), and logs an `audit_events` entry.
-3. **Human Review & Verification Gate:**
+3. **Human Review & Verification Gate (`backend/app/services/review_service.py`):**
    - Reviewer inspects the document stream (`/documents/{documentId}/content`) alongside extracted/entered fields in the Review Centre.
-   - Edits via `PATCH /invoices/{invoiceId}` recompute header totals and advisory line-item reconciliation server-side without changing approval state.
-   - `POST /invoices/{invoiceId}/verify` requires an authorized human user (`REVIEWER` or `WORKSPACE_ADMIN`), rejects unacknowledged header or line-item variances (`409 VARIANCE_ACKNOWLEDGMENT_REQUIRED` until `confirmVarianceAcknowledgment = true` with note), transitions the invoice to `VERIFIED`, writes an immutable `review_actions` record, and appends to `audit_events`.
+   - Edits via `PATCH /invoices/{invoiceId}` recompute header totals and advisory line-item reconciliation server-side and log `ReviewAction(actionType="SAVE_EDITS")` without changing approval state.
+   - `POST /invoices/{invoiceId}/verify` requires an authorized human user (`REVIEWER` or `WORKSPACE_ADMIN`) under a `FOR UPDATE` row lock (strictly `Invoice -> InvoiceReviewFlag` lock order across all review mutations to prevent deadlocks), enforces mandatory field verification, rejects unacknowledged header or line-item variances (`409 VARIANCE_ACKNOWLEDGMENT_REQUIRED` until `confirmVarianceAcknowledgment = true` with non-blank `confirmationNote`), transitions the invoice to `VERIFIED`, writes an immutable `review_actions` record, and appends to `audit_events`.
+   - `POST /invoices/{invoiceId}/flag`, `POST /flags/{flagId}/resolve`, and `POST /invoices/{invoiceId}/reopen` manage exception lifecycles while preserving all resolved flags, review actions, and audit logs (exposed chronologically and sanitized via `GET /invoices/{invoiceId}/review-history`).
 4. **Reporting & Formula-Safe CSV Export:**
    - `GET /reports/summary` and `GET /reports/monthly-trend` aggregate PostgreSQL records directly using `DATE_TRUNC('month', invoice_date)` and exact `NUMERIC` sums.
    - `GET /reports/export.csv` streams RFC-4180 CSV with server-side formula-injection sanitization (`=`, `+`, `-`, `@`, `\t`, `\r`) and records an export audit event.

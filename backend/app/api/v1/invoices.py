@@ -14,6 +14,7 @@ from app.core.deps import (
     require_workspace_role,
 )
 from app.db.session import get_db
+from app.models.review import InvoiceReviewFlag
 from app.schemas.invoices import (
     DuplicateMatchDto,
     InvoiceCreateRequest,
@@ -24,6 +25,7 @@ from app.schemas.invoices import (
     InvoiceLineItemDto,
     InvoiceListResponse,
     InvoiceReconciliationSummaryDto,
+    InvoiceReviewFlagDto,
     InvoiceSortBy,
     InvoiceStatus,
     InvoiceSummaryDto,
@@ -125,7 +127,31 @@ def _to_invoice_summary_dto(row: InvoiceSummaryRow) -> InvoiceSummaryDto:
     return InvoiceSummaryDto(**_summary_fields(row))  # type: ignore[arg-type]
 
 
-def _to_invoice_detail_dto(record: InvoiceDetailRecord) -> InvoiceDetailDto:
+def to_invoice_review_flag_dto(flag: InvoiceReviewFlag) -> InvoiceReviewFlagDto:
+    return InvoiceReviewFlagDto(
+        id=flag.id,
+        workspace_id=flag.workspace_id,
+        invoice_id=flag.invoice_id,
+        flag_category=flag.flag_category,
+        reason_text=flag.reason_text,
+        status=flag.status,  # type: ignore[arg-type]
+        created_by_user_id=flag.created_by_user_id,
+        created_by_name=(
+            flag.created_by_user.full_name if flag.created_by_user is not None else None
+        ),
+        resolved_by_user_id=flag.resolved_by_user_id,
+        resolved_by_name=(
+            flag.resolved_by_user.full_name
+            if flag.resolved_by_user is not None
+            else None
+        ),
+        resolution_note=flag.resolution_note,
+        created_at=flag.created_at,
+        resolved_at=flag.resolved_at,
+    )
+
+
+def to_invoice_detail_dto(record: InvoiceDetailRecord) -> InvoiceDetailDto:
     inv = record.invoice
     base = _summary_fields(
         InvoiceSummaryRow(
@@ -146,6 +172,10 @@ def _to_invoice_detail_dto(record: InvoiceDetailRecord) -> InvoiceDetailDto:
         InvoiceFieldVerificationDto.model_validate(fv)
         for fv in inv.field_verifications
     ]
+    ordered_flags = sorted(
+        inv.review_flags, key=lambda flag: (flag.created_at, str(flag.id))
+    )
+    flag_dtos = [to_invoice_review_flag_dto(flag) for flag in ordered_flags]
     recon = record.reconciliation
     recon_dto = InvoiceReconciliationSummaryDto(
         rounding_tolerance=recon.rounding_tolerance,
@@ -183,9 +213,13 @@ def _to_invoice_detail_dto(record: InvoiceDetailRecord) -> InvoiceDetailDto:
         document=doc_dto,
         line_items=line_item_dtos,
         field_verifications=field_verif_dtos,
+        review_flags=flag_dtos,
         reconciliation=recon_dto,
         duplicate_matches=dup_dtos,
     )
+
+
+_to_invoice_detail_dto = to_invoice_detail_dto
 
 
 @router.get(

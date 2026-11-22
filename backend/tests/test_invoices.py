@@ -1515,3 +1515,77 @@ def test_postgres_invoice_constraints_block_unverified_delete_and_unattributed_v
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
+
+
+def test_postgres_draft_placeholder_numbers_do_not_false_collide_while_real_numbers_match(
+    make_client: Callable[..., TestClient],
+) -> None:
+    admin_client = make_client()
+    uid = uuid.uuid4().hex[:8]
+    reg = _register_user(admin_client, prefix="inv_draft_dup", org_name=f"Draft Dup {uid}")
+    ws_id = reg["workspace"]["workspaceId"]
+
+    sup_resp = admin_client.post(
+        f"/api/v1/workspaces/{ws_id}/suppliers",
+        headers=_csrf_headers(admin_client),
+        json={"name": "Deccan Components LLP", "gstin": "27AAACD4321B1Z2"},
+    )
+    assert sup_resp.status_code == 201, sup_resp.text
+    sup_id = sup_resp.json()["id"]
+
+    # Create zero-total draft placeholder invoices (digit-leading, zero-leading, alpha-leading, and repeated)
+    for draft_no in ("DRAFT-1234ABCD", "DRAFT-0ABC1234", "DRAFT-ABCD1234", "DRAFT-1234ABCD"):
+        resp = admin_client.post(
+            f"/api/v1/workspaces/{ws_id}/invoices",
+            headers=_csrf_headers(admin_client),
+            json={
+                "supplierId": sup_id,
+                "invoiceNumber": draft_no,
+                "taxableAmount": "0.00",
+                "totalAmount": "0.00",
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        body = resp.json()
+        assert body["duplicateWarning"] is None
+        assert body["duplicateMatches"] == []
+
+    # Legitimate supplier invoice numbers must NOT be suppressed
+    legit_1 = admin_client.post(
+        f"/api/v1/workspaces/{ws_id}/invoices",
+        headers=_csrf_headers(admin_client),
+        json={
+            "supplierId": sup_id,
+            "invoiceNumber": "INV-2026-001",
+            "invoiceDate": "2026-11-05",
+            "taxableAmount": "1000.00",
+            "cgstAmount": "90.00",
+            "sgstAmount": "90.00",
+            "totalAmount": "1180.00",
+        },
+    )
+    assert legit_1.status_code == 201, legit_1.text
+    legit_1_id = legit_1.json()["id"]
+    assert legit_1.json()["duplicateWarning"] is None
+
+    legit_2 = admin_client.post(
+        f"/api/v1/workspaces/{ws_id}/invoices",
+        headers=_csrf_headers(admin_client),
+        json={
+            "supplierId": sup_id,
+            "invoiceNumber": "inv/2026/001",
+            "invoiceDate": "2026-11-12",
+            "taxableAmount": "2000.00",
+            "cgstAmount": "180.00",
+            "sgstAmount": "180.00",
+            "totalAmount": "2360.00",
+        },
+    )
+    assert legit_2.status_code == 201, legit_2.text
+    legit_2_json = legit_2.json()
+    assert legit_2_json["duplicateWarning"] is not None
+    assert any(
+        m["invoiceId"] == legit_1_id
+        and "NORMALIZED_INVOICE_NUMBER" in m["matchReasons"]
+        for m in legit_2_json["duplicateMatches"]
+    )

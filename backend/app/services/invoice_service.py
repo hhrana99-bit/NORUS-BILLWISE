@@ -19,7 +19,7 @@ from app.models.accounting import (
     InvoiceLineItem,
     Supplier,
 )
-from app.models.review import InvoiceReviewFlag
+from app.models.review import InvoiceReviewFlag, ReviewAction
 from app.models.tenancy import User, Workspace, WorkspaceSettings, utc_now
 from app.schemas.invoices import (
     DuplicateMatchReason,
@@ -83,11 +83,21 @@ class InvoiceDetailRecord:
     duplicate_matches: tuple[DuplicateMatch, ...]
 
 
+def is_placeholder_supplier_name(name: str) -> bool:
+    return normalize_supplier_name(name) in _PLACEHOLDER_SUPPLIER_NAMES
+
+
+def is_draft_placeholder_number(normalized_invoice_number: str) -> bool:
+    return normalized_invoice_number.startswith("draft-") or bool(
+        _DRAFT_PLACEHOLDER_NORM_REGEX.fullmatch(normalized_invoice_number)
+    )
+
+
 def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _get_workspace_settings(
+def get_workspace_settings(
     db: Session, workspace_id: uuid.UUID
 ) -> WorkspaceSettings | None:
     return db.scalar(
@@ -95,6 +105,9 @@ def _get_workspace_settings(
             WorkspaceSettings.workspace_id == workspace_id
         )
     )
+
+
+_get_workspace_settings = get_workspace_settings
 
 
 def _resolve_workspace_supplier(
@@ -230,9 +243,8 @@ def detect_advisory_duplicates(
 
     cand_total = quantize_money(total_amount)
     is_zero_draft_placeholder = (
-        normalized_invoice_number.startswith("draft-")
-        or bool(_DRAFT_PLACEHOLDER_NORM_REGEX.fullmatch(normalized_invoice_number))
-    ) and cand_total == ZERO
+        is_draft_placeholder_number(normalized_invoice_number) and cand_total == ZERO
+    )
 
     match_clauses = []
     if normalized_invoice_number and not is_zero_draft_placeholder:
@@ -517,7 +529,7 @@ def list_invoices(
     ], int(total)
 
 
-def _load_active_invoice_detail(
+def load_active_invoice_detail(
     db: Session,
     *,
     workspace_id: uuid.UUID,
@@ -531,6 +543,12 @@ def _load_active_invoice_detail(
             joinedload(Invoice.document),
             selectinload(Invoice.line_items),
             selectinload(Invoice.field_verifications),
+            selectinload(Invoice.review_flags).joinedload(
+                InvoiceReviewFlag.created_by_user
+            ),
+            selectinload(Invoice.review_flags).joinedload(
+                InvoiceReviewFlag.resolved_by_user
+            ),
         )
         .where(
             Invoice.id == invoice_id,
@@ -545,16 +563,7 @@ def _load_active_invoice_detail(
             message="Invoice not found.",
         )
 
-    open_flag_count = (
-        db.scalar(
-            select(func.count(InvoiceReviewFlag.id)).where(
-                InvoiceReviewFlag.workspace_id == workspace_id,
-                InvoiceReviewFlag.invoice_id == invoice.id,
-                InvoiceReviewFlag.status == "OPEN",
-            )
-        )
-        or 0
-    )
+    open_flag_count = sum(1 for flag in invoice.review_flags if flag.status == "OPEN")
 
     resolved_settings = ws_settings or _get_workspace_settings(db, workspace_id)
     tolerance = (
@@ -610,6 +619,9 @@ def _load_active_invoice_detail(
     )
 
 
+_load_active_invoice_detail = load_active_invoice_detail
+
+
 def get_invoice_detail(
     db: Session,
     *,
@@ -617,7 +629,7 @@ def get_invoice_detail(
     invoice_id: uuid.UUID,
 ) -> InvoiceDetailRecord:
     """Retrieve a single active workspace-scoped invoice with reconciliation and duplicates."""
-    return _load_active_invoice_detail(
+    return load_active_invoice_detail(
         db,
         workspace_id=workspace_id,
         invoice_id=invoice_id,
@@ -1135,6 +1147,25 @@ def update_invoice(
     )
     invoice.duplicate_warning = duplicate_warning
 
+    sorted_changed_fields = sorted(set(changed_fields))
+    db.add(
+        ReviewAction(
+            workspace_id=workspace.id,
+            invoice_id=invoice.id,
+            actor_user_id=actor.id,
+            action_type="SAVE_EDITS",
+            previous_status=invoice.status,
+            new_status=invoice.status,
+            variance_acknowledged=False,
+            variance_amount_at_action=quantize_money(Decimal(invoice.variance_amount)),
+            comment=(
+                f"Saved edits to: {', '.join(sorted_changed_fields)}"
+                if sorted_changed_fields
+                else "Saved invoice review update."
+            ),
+            field_changes={"updatedFields": sorted_changed_fields},
+        )
+    )
     db.flush()
 
     record_audit_event(
@@ -1155,7 +1186,7 @@ def update_invoice(
         else "neutral",
         metadata={
             "invoiceId": str(invoice.id),
-            "updatedFields": sorted(set(changed_fields)),
+            "updatedFields": sorted_changed_fields,
             "status": invoice.status,
             "reconciliationStatus": invoice.reconciliation_status,
             "lineItemReconciliationStatus": invoice.line_item_reconciliation_status,

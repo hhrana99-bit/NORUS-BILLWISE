@@ -95,14 +95,25 @@ def register_exception_handlers(application: FastAPI) -> None:
             }
             for err in exc.errors()
         ]
-        # Preserve specific contract error code when requireHumanReview=false is rejected
+        # Preserve specific contract error codes raised inside Pydantic field validators
         error_code = "VALIDATION_ERROR"
         message = "Request validation failed."
+        contract_markers = (
+            ("HUMAN_REVIEW_CANNOT_BE_DISABLED", "requireHumanReview cannot be disabled."),
+            ("EMPTY_FLAG_REASON", "reasonText cannot be blank."),
+            ("INVALID_FLAG_RESOLUTION", "resolutionNote cannot be blank."),
+            ("REOPEN_REASON_REQUIRED", "reason cannot be blank."),
+        )
         for err in exc.errors():
             err_msg = str(err.get("msg", ""))
-            if "HUMAN_REVIEW_CANNOT_BE_DISABLED" in err_msg:
-                error_code = "HUMAN_REVIEW_CANNOT_BE_DISABLED"
-                message = "requireHumanReview cannot be disabled."
+            matched = False
+            for marker, marker_msg in contract_markers:
+                if marker in err_msg:
+                    error_code = marker
+                    message = marker_msg
+                    matched = True
+                    break
+            if matched:
                 break
 
         return build_error_response(
