@@ -75,6 +75,14 @@ _ALLOWED_FIELD_KEYS = frozenset(
         "total_amount",
     }
 )
+_FIELD_KEY_ALIASES: dict[str, str] = {
+    **{key: key for key in _ALLOWED_FIELD_KEYS},
+    **{to_camel(key): key for key in _ALLOWED_FIELD_KEYS},
+    "cgst": "cgst_amount",
+    "sgst": "sgst_amount",
+    "igst": "igst_amount",
+    "cess": "cess_amount",
+}
 
 
 def _ensure_no_nul(value: str, *, field_label: str) -> str:
@@ -288,9 +296,10 @@ class InvoiceFieldVerificationInput(ApiModel):
     def validate_field_key(cls, value: str) -> str:
         _ensure_no_nul(value, field_label="fieldVerifications[].fieldKey")
         cleaned = value.strip()
-        if cleaned not in _ALLOWED_FIELD_KEYS:
+        canonical = _FIELD_KEY_ALIASES.get(cleaned)
+        if canonical is None:
             raise ValueError(f"Unsupported fieldKey: {cleaned!r}.")
-        return cleaned
+        return canonical
 
     @field_validator("evidence_note")
     @classmethod

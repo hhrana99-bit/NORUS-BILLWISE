@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -54,6 +55,7 @@ _PLACEHOLDER_SUPPLIER_NAMES = frozenset(
 )
 _DUPLICATE_AMOUNT_WINDOW_DAYS = 45
 _DUPLICATE_NUMBER_CROSS_FY_DAYS = 180
+_DRAFT_PLACEHOLDER_NORM_REGEX = re.compile(r"^draft-?[0-9a-f]{8}$")
 
 
 @dataclass(frozen=True)
@@ -228,8 +230,9 @@ def detect_advisory_duplicates(
 
     cand_total = quantize_money(total_amount)
     is_zero_draft_placeholder = (
-        normalized_invoice_number.startswith("draft-") and cand_total == ZERO
-    )
+        normalized_invoice_number.startswith("draft-")
+        or bool(_DRAFT_PLACEHOLDER_NORM_REGEX.fullmatch(normalized_invoice_number))
+    ) and cand_total == ZERO
 
     match_clauses = []
     if normalized_invoice_number and not is_zero_draft_placeholder:

@@ -1,8 +1,8 @@
 # NEXT_TASK — Exact Next Recommended Development Task
 
-## Baseline & Checkpoint (`389868fa2213389609de8aaa8c5b7e67044ba47a` + Task 002.5)
+## Baseline & Checkpoint (`606ac011d2615735f23e8eaa9b086c52935a3f2a` + Task 002.5A)
 
-Remote `main` (`389868fa2213389609de8aaa8c5b7e67044ba47a`) is **100% green** on GitHub Actions (`45011666003`). Task 002.5 (Invoices CRUD, GST/line-item `Decimal` reconciliation engine, advisory duplicate detection, and `test_invoices.py`) is implemented locally and must pass CI (`pytest -v -ra` against PostgreSQL 16) before merging and starting Task 002.6.
+Remote `main` (`606ac011d2615735f23e8eaa9b086c52935a3f2a`) already contains Task 002.5 (`feat: implement invoices CRUD and GST reconciliation`), and GitHub Actions CI run #24 (`45014078164`) passed Frontend and Alembic upgrade but failed in `pytest`. Task 002.5A resolves the confirmed `fieldKey` camelCase normalization failure and `DRAFT-<8hex>` placeholder duplicate edge case. Apply `NORUS-TASK-002-5A.patch` on a dedicated feature branch and verify full green GitHub Actions CI (`pytest -v -ra` against PostgreSQL 16) before merging and starting Task 002.6.
 
 ---
 

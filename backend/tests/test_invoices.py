@@ -70,6 +70,8 @@ def test_normalize_invoice_number_unifies_formatting_while_preserving_numeric_bo
     assert normalize_invoice_number("INV/001") == "inv001"
     assert normalize_invoice_number("INV001") == "inv001"
     assert normalize_invoice_number("10-1") != normalize_invoice_number("1-01")
+    assert normalize_invoice_number("DRAFT-1234ABCD") == "draft1234abcd"
+    assert normalize_invoice_number("DRAFT-ABCD1234") == "draft-abcd1234"
 
 
 def test_indian_financial_year_helpers() -> None:
@@ -320,6 +322,34 @@ def test_invoice_schemas_reject_status_tampering_invalid_amounts_and_serialize_f
 
     with pytest.raises(ValidationError, match="cannot be null"):
         InvoiceUpdateRequest.model_validate({"taxableAmount": None})
+
+    # fieldKey accepts both camelCase and canonical snake_case, canonicalizing & blocking mixed duplicates
+    camel_fv = InvoiceUpdateRequest.model_validate(
+        {"fieldVerifications": [{"fieldKey": "totalAmount", "status": "VERIFIED"}]}
+    )
+    assert camel_fv.field_verifications is not None
+    assert camel_fv.field_verifications[0].field_key == "total_amount"
+
+    snake_fv = InvoiceUpdateRequest.model_validate(
+        {"fieldVerifications": [{"fieldKey": "cgst", "status": "NEEDS_REVIEW"}]}
+    )
+    assert snake_fv.field_verifications is not None
+    assert snake_fv.field_verifications[0].field_key == "cgst_amount"
+
+    with pytest.raises(ValidationError, match="Duplicate fieldKey"):
+        InvoiceUpdateRequest.model_validate(
+            {
+                "fieldVerifications": [
+                    {"fieldKey": "totalAmount", "status": "VERIFIED"},
+                    {"fieldKey": "total_amount", "status": "FLAGGED"},
+                ]
+            }
+        )
+
+    with pytest.raises(ValidationError, match="Unsupported fieldKey"):
+        InvoiceUpdateRequest.model_validate(
+            {"fieldVerifications": [{"fieldKey": "unknownField", "status": "VERIFIED"}]}
+        )
 
     # Fixed decimal string serialization check
     now = utc_now()
