@@ -3,7 +3,7 @@
 **Company:** NORUS AI  
 **Product:** NORUS BILLWISE (*Beyond the World.*)  
 **Milestone:** Task 002.1A Target Architecture *(Tasks 002.2–002.4D implemented for Auth, Tenancy/RBAC, Suppliers, and Document Storage; Invoices, Human Review, Reports, Frontend API wiring, and S3/ClamAV remain pending)*  
-**Document Status:** Architecture Baseline (`e022634a`; see `docs/STATUS.md` for live progress)
+**Document Status:** Architecture Baseline (`b3e04609`; see `docs/STATUS.md` for live progress)
 
 ---
 
