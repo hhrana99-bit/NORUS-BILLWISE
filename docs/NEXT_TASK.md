@@ -1,10 +1,12 @@
 # NEXT_TASK — Exact Next Recommended Development Task
 
-## Immediate Verification Prerequisite (Run Outside Container Runtime)
+## Immediate Blocker Before Task 002.5: CI #20 Step 9 Recovery
+
+Remote `main` (`e022634a7e2265231f12e5a101ca631fd0374deb`) already includes the Task 002.4D `HTTP_413_REQUEST_ENTITY_TOO_LARGE` fixes, `task-002-4c.patch` removal, and `docs/DATABASE_SCHEMA.md` update, **but GitHub Actions CI #20 (`45008480467`) still fails at Backend Step 9 (`pytest -v -ra`)** while raw CI logs return `HTTP 403` without authentication.
 
 Before starting Task 002.5 implementation:
-1. Open a feature branch off current remote `main` commit `1adcbdcd558bac2821ade1db1b3ee4b5b4db7d6f` with Task 002.4D (`status.HTTP_413_REQUEST_ENTITY_TOO_LARGE` fix in `backend/app/main.py` and `backend/app/services/storage_service.py`, removal of `/task-002-4c.patch`, and documentation updates).
-2. Inspect the CI #18 (`44877773232`) Step 9 log (or run `pytest -v -ra` on **Python 3.12 + PostgreSQL 16**) to confirm the 4 document tests pass and identify/resolve the remaining 5th failure from CI #18 (`5 failed, 92 passed, 1 warning`):
+1. Inspect the authenticated **GitHub Actions CI #20 (`45008480467`) Step 9 log** (or run the full backend suite locally on **Python 3.12 + PostgreSQL 16** against `e022634a`) to obtain the exact failing test name(s) and traceback(s).
+2. Fix the root cause of the remaining Step 9 failure(s) on a feature branch off `e022634a7e2265231f12e5a101ca631fd0374deb` and remove the committed root `NORUS-TASK-002-4D.patch` artifact, then verify a 100% green CI run:
 
 ```bash
 cd backend

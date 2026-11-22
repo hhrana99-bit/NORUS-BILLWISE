@@ -2,7 +2,7 @@
 
 **Database Engine:** PostgreSQL 16+  
 **ORM / Migration Tool:** SQLAlchemy 2.0 + Alembic  
-**Milestone:** Task 002.1A — Proposed Database Design (Finalized Decisions; Not yet implemented)
+**Milestone:** Task 002.1A Schema Specification *(All 17 tables implemented in SQLAlchemy models & Alembic migrations `0001`–`0003`; Invoice/Review/Report endpoints pending Task 002.5–002.7)*
 
 ---
 

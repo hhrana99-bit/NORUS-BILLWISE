@@ -2,8 +2,8 @@
 
 **Company:** NORUS AI  
 **Product:** NORUS BILLWISE (*Beyond the World.*)  
-**Milestone:** Task 002.1A — Backend Architecture & Database Design (Decisions Finalized)  
-**Document Status:** Proposed Target Design (No backend code implemented yet)
+**Milestone:** Task 002.1A Target Architecture *(Tasks 002.2–002.4D implemented for Auth, Tenancy/RBAC, Suppliers, and Document Storage; Invoices, Human Review, Reports, Frontend API wiring, and S3/ClamAV remain pending)*  
+**Document Status:** Architecture Baseline (`e022634a`; see `docs/STATUS.md` for live progress)
 
 ---
 
@@ -219,7 +219,7 @@ variance_amount = total_amount - expected_total
   - Size cap (`15 MB` default, configurable via env).
   - Stored using server-generated UUID path keys (`storage_key`) outside the web root; original filename sanitized and stored solely as metadata.
   - Content endpoint streams with `X-Content-Type-Options: nosniff` and strict CSP / `Content-Disposition: inline` (for verified safe PDF/image) or `attachment` download fallback.
-  - Designed with `scan_status` (`PENDING`, `CLEAN`, `INFECTED`, `SKIPPED_DEV`) so ClamAV / open-source scanning can gate previews in production.
+  - Designed with `scan_status` (`PENDING`, `CLEAN`, `INFECTED`, `FAILED`, `SKIPPED_DEV`) so ClamAV / open-source scanning can gate previews in production.
 - **Environment & Secret Management:** All secrets (`DATABASE_URL`, `JWT_SECRET_KEY`, `STORAGE_ROOT`/`S3_ENDPOINT`, `CORS_ORIGINS`) loaded via `pydantic-settings` from environment variables; `.env` remains untracked in `.gitignore`; startup fails fast if production secrets are missing or insecure defaults are used.
 - **Audit Logging & Privacy:**
   - `audit_events` captures authentication, membership changes, settings updates, uploads, field edits, flag creations/resolutions, verifications, CSV exports, and draft deletions.

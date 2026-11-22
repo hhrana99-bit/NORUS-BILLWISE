@@ -2,7 +2,7 @@
 
 **API Prefix:** `/api/v1`  
 **Framework:** FastAPI + Pydantic v2  
-**Milestone:** Task 002.1A — Proposed REST API Specification (Finalized Decisions; Not yet implemented)
+**Milestone:** Task 002.1A Target REST Specification *(Auth, Organizations/Workspaces/RBAC, Suppliers, and Documents endpoints implemented in Tasks 002.2–002.4D; Invoices, Human Review, and Reports endpoints pending Task 002.5–002.7)*
 
 ---
 
