@@ -35,7 +35,7 @@ export function Sidebar({
   mobileOpen: boolean;
   onCloseMobile: () => void;
 }) {
-  const { activeRoute, navigate, invoices } = useWorkspace();
+  const { activeRoute, navigate, invoices, reportSummary } = useWorkspace();
 
   useEffect(() => {
     if (!mobileOpen) return;
@@ -49,9 +49,11 @@ export function Sidebar({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [mobileOpen, onCloseMobile]);
 
-  const pendingOrFlaggedCount = invoices.filter(
-    (inv) => inv.status === 'Pending Review' || inv.status === 'Flagged'
-  ).length;
+  const pendingOrFlaggedCount =
+    reportSummary?.outstandingReviewCount ??
+    invoices.filter(
+      (inv) => inv.status === 'Pending Review' || inv.status === 'Flagged'
+    ).length;
 
   const handleSelect = (route: AppRoute) => {
     navigate(route);
@@ -85,7 +87,7 @@ export function Sidebar({
                 key={item.route}
                 type="button"
                 onClick={() => handleSelect(item.route)}
-                className={`flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-sm font-medium transition-colors duration-150 whitespace-nowrap ${
+                className={`flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-sm font-medium whitespace-nowrap transition-colors duration-150 ${
                   isActive
                     ? 'bg-indigo-600 text-white'
                     : 'text-slate-300 hover:bg-slate-900 hover:text-white'
@@ -117,7 +119,8 @@ export function Sidebar({
             <span>Human Review Enforced</span>
           </div>
           <p className="mt-1.5 text-[11px] leading-relaxed text-slate-400">
-            Frontend Prototype (Task 001). Local sample data only — no records auto-posted.
+            Explicit reviewer approval is required before any invoice is
+            marked Verified.
           </p>
         </div>
         <div className="mt-3 flex items-center justify-between px-1 text-[11px] text-slate-400">

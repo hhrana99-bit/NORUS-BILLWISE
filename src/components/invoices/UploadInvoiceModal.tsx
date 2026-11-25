@@ -7,10 +7,16 @@ import {
   type DragEvent,
   type FormEvent,
 } from 'react';
-import { createDemoUploadedInvoice } from '../../services/invoiceService';
+import { formatApiErrorMessage } from '../../services/apiClient';
 import { useWorkspace } from '../../state/WorkspaceContext';
 
-const ACCEPTED_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp'];
+const ACCEPTED_TYPES = [
+  'application/pdf',
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+];
+const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 
 export function UploadInvoiceModal({
   open,
@@ -19,7 +25,7 @@ export function UploadInvoiceModal({
   open: boolean;
   onClose: () => void;
 }) {
-  const { suppliers, addUploadedInvoice, selectInvoiceForReview } = useWorkspace();
+  const { suppliers, uploadInvoiceFile, activeWorkspaceRole } = useWorkspace();
   const inputRef = useRef<HTMLInputElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -27,21 +33,27 @@ export function UploadInvoiceModal({
   const [supplierName, setSupplierName] = useState('');
   const [invoiceNumber, setInvoiceNumber] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+
+  const canUpload =
+    activeWorkspaceRole === 'WORKSPACE_ADMIN' ||
+    activeWorkspaceRole === 'REVIEWER' ||
+    activeWorkspaceRole === 'UPLOADER';
 
   useEffect(() => {
     if (!open) return;
     closeButtonRef.current?.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      if (event.key === 'Escape' && !submitting) {
         event.preventDefault();
         onClose();
       }
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [open, onClose]);
+  }, [open, onClose, submitting]);
 
   if (!open) return null;
 
@@ -50,6 +62,14 @@ export function UploadInvoiceModal({
     if (!file) return;
     if (!ACCEPTED_TYPES.includes(file.type)) {
       setErrorMsg('Please select a PDF, PNG, JPG, or WEBP file.');
+      return;
+    }
+    if (file.size <= 0) {
+      setErrorMsg('Selected file is empty.');
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setErrorMsg('File exceeds the 15 MB maximum upload limit.');
       return;
     }
     setSelectedFile(file);
@@ -65,28 +85,34 @@ export function UploadInvoiceModal({
     validateAndSetFile(e.dataTransfer.files?.[0]);
   };
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (!canUpload) {
+      setErrorMsg('Your workspace role is read-only and cannot upload documents.');
+      return;
+    }
     if (!selectedFile) {
-      setErrorMsg('Select a sample PDF or image file to stage in the local workspace.');
+      setErrorMsg('Select a PDF or image invoice file to upload.');
       return;
     }
 
-    const previewUrl = URL.createObjectURL(selectedFile);
-    const created = createDemoUploadedInvoice({
-      file: selectedFile,
-      previewUrl,
-      supplierName,
-      invoiceNumber,
-      suppliers,
-    });
-
-    addUploadedInvoice(created);
-    setSelectedFile(null);
-    setSupplierName('');
-    setInvoiceNumber('');
-    onClose();
-    selectInvoiceForReview(created.id);
+    setErrorMsg('');
+    setSubmitting(true);
+    try {
+      await uploadInvoiceFile({
+        file: selectedFile,
+        supplierName: supplierName.trim() || undefined,
+        invoiceNumber: invoiceNumber.trim() || undefined,
+      });
+      setSelectedFile(null);
+      setSupplierName('');
+      setInvoiceNumber('');
+      onClose();
+    } catch (err) {
+      setErrorMsg(formatApiErrorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -96,7 +122,7 @@ export function UploadInvoiceModal({
       aria-modal="true"
       aria-labelledby="upload-modal-title"
       onClick={(e) => {
-        if (e.target === e.currentTarget) {
+        if (e.target === e.currentTarget && !submitting) {
           onClose();
         }
       }}
@@ -108,19 +134,23 @@ export function UploadInvoiceModal({
               <Upload className="h-4 w-4" />
             </div>
             <div>
-              <h2 id="upload-modal-title" className="text-sm font-semibold text-slate-900">
-                Upload Supplier Invoice (Local Demo)
+              <h2
+                id="upload-modal-title"
+                className="text-sm font-semibold text-slate-900"
+              >
+                Upload Supplier Invoice
               </h2>
               <p className="text-xs text-slate-500">
-                Stage PDF or image files into the Pending Review queue
+                Upload PDF or image document and create a Pending Review draft
               </p>
             </div>
           </div>
           <button
             ref={closeButtonRef}
             type="button"
+            disabled={submitting}
             onClick={onClose}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:opacity-50"
             aria-label="Close modal"
           >
             <X className="h-4 w-4" />
@@ -131,16 +161,16 @@ export function UploadInvoiceModal({
           <div className="flex items-start gap-2.5 rounded-lg border border-indigo-200 bg-indigo-50/60 p-3 text-xs text-indigo-950">
             <Info className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
             <p className="leading-relaxed">
-              <strong>Frontend Prototype Notice:</strong> Selected files are previewed
-              locally in your browser only. No server upload, OCR, or AI extraction runs
-              in Task 001. Do not upload real confidential customer invoices.
+              Uploaded files are validated server-side (magic bytes, size limit
+              15 MB) and staged into <strong>Pending Review</strong> for manual
+              accounting entry and mandatory human verification.
             </p>
           </div>
 
           <div
             role="button"
             tabIndex={0}
-            aria-label="Choose a PDF or image file to stage locally"
+            aria-label="Choose a PDF or image file to upload"
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
@@ -174,7 +204,7 @@ export function UploadInvoiceModal({
                   {selectedFile.name}
                 </p>
                 <p className="mt-0.5 font-mono text-xs text-slate-500 tabular-nums">
-                  {(selectedFile.size / 1024).toFixed(1)} KB · Ready to stage locally
+                  {(selectedFile.size / 1024).toFixed(1)} KB · Ready to upload
                 </p>
               </div>
             ) : (
@@ -183,7 +213,7 @@ export function UploadInvoiceModal({
                   Click to choose a PDF or image, or drag and drop
                 </p>
                 <p className="mt-1 text-xs text-slate-500">
-                  Supports PDF, PNG, JPG, WEBP
+                  Supports PDF, PNG, JPG, WEBP up to 15 MB
                 </p>
               </div>
             )}
@@ -192,14 +222,14 @@ export function UploadInvoiceModal({
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <label className="block text-xs font-medium text-slate-700">
-                Reference Supplier Name (Optional)
+                Supplier Name (Optional)
               </label>
               <input
                 type="text"
                 list="known-suppliers-list"
                 value={supplierName}
                 onChange={(e) => setSupplierName(e.target.value)}
-                placeholder="e.g. Sample Logistics LLP"
+                placeholder="e.g. Apex Industrial Components"
                 className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 text-xs focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
               />
               <datalist id="known-suppliers-list">
@@ -210,36 +240,40 @@ export function UploadInvoiceModal({
             </div>
             <div>
               <label className="block text-xs font-medium text-slate-700">
-                Reference Invoice No. (Optional)
+                Invoice Number (Optional)
               </label>
               <input
                 type="text"
                 value={invoiceNumber}
                 onChange={(e) => setInvoiceNumber(e.target.value)}
-                placeholder="e.g. DEMO-2026-01"
+                placeholder="e.g. INV-2026-041"
                 className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
               />
             </div>
           </div>
 
           {errorMsg && (
-            <p className="text-xs font-medium text-rose-600">{errorMsg}</p>
+            <p className="text-xs font-medium text-rose-600" role="alert">
+              {errorMsg}
+            </p>
           )}
 
           <div className="flex flex-wrap items-center justify-end gap-2.5 pt-2">
             <button
               type="button"
+              disabled={submitting}
               onClick={onClose}
-              className="rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+              className="rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 whitespace-nowrap"
+              disabled={submitting || !canUpload}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-60"
             >
               <Upload className="h-3.5 w-3.5" />
-              Stage &amp; Open in Review Centre
+              {submitting ? 'Uploading...' : 'Upload & Open Review Centre'}
             </button>
           </div>
         </form>

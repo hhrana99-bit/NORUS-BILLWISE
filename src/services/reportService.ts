@@ -171,14 +171,14 @@ export function buildMonthlyTrendStats(
   return stats;
 }
 
-const FORMULA_PREFIX_PATTERN = /^[=+\-@\t\r]/;
+const FORMULA_PREFIX_PATTERN = /^[=+\-@\t\r\n]|^[\s\u0000-\u001f]+[=+\-@]/;
 
 export function sanitizeCsvCell(value: string | number): string {
   if (typeof value === 'number') {
     return Number.isFinite(value) ? String(value) : '0';
   }
 
-  let str = String(value);
+  let str = String(value).replace(/\u0000/g, '');
   if (FORMULA_PREFIX_PATTERN.test(str)) {
     str = `'${str}`;
   }

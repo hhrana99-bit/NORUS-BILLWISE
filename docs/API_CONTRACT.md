@@ -2,7 +2,7 @@
 
 **API Prefix:** `/api/v1`  
 **Framework:** FastAPI + Pydantic v2  
-**Milestone:** Task 002.6 Implemented Human Review Workflow, Exception Flags & Audit Ledger *(Auth, Organizations/Workspaces/RBAC, Suppliers, Documents, Invoices/GST Reconciliation, and Human Review implemented in Tasks 002.2–002.6; Reports and Frontend API integration pending Task 002.7)*
+**Milestone:** Task 002.7 Implemented Reports API, Formula-Safe CSV Export & Frontend Workspace API Integration *(Auth, Organizations/Workspaces/RBAC, Suppliers, Documents, Invoices/GST Reconciliation, Human Review, Reports & Formula-Safe CSV Export, and React SPA API wiring implemented in Tasks 002.2–002.7; ClamAV/S3 & Task 002.8 pending)*
 
 ---
 
@@ -386,37 +386,44 @@
 ## 8. Reports & Exports Endpoints
 
 ### `GET /api/v1/workspaces/{workspaceId}/reports/summary`
-- **Purpose:** Compute live workspace KPIs and tax totals across active (non-soft-deleted) invoices (`totalInvoices`, status counts/values, `verificationRatePercent`, `totalTaxableValue`, `totalCgst`, `totalSgst`, `totalIgst`, `totalCess`, `totalGst`, `totalInvoiceValue`).
-- **Auth:** Any active workspace member.
-- **Query Params:** Optional `dateFrom`, `dateTo`.
-- **Response (`200 OK`):** Summary metrics DTO.
+- **Purpose:** Compute live workspace KPIs and exact `Decimal` GST totals across active (non-soft-deleted) invoices using direct SQL aggregations (with a separate `OPEN` flag count query to avoid join fan-out double counting).
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`.
+- **Query Params:** Optional `dateFrom`, `dateTo` (`YYYY-MM-DD`, filtering `invoiceDate`; rejects `dateFrom > dateTo` with `422 VALIDATION_ERROR`), optional `currency` (3-char ISO code).
+- **Mixed-Currency Guard:** Returns `409 MIXED_CURRENCY_NOT_SUPPORTED` if matching workspace invoices span multiple currencies and no `currency` filter is supplied.
+- **Response (`200 OK`):** `ReportSummaryResponse` (`workspaceId`, `currency`, `dateFrom`, `dateTo`, `totalInvoices`, `pendingCount`, `verifiedCount`, `flaggedCount`, `verificationRatePercent`, 2-decimal string totals `pendingValue`, `verifiedValue`, `flaggedValue`, `totalTaxableValue`, `totalCgst`, `totalSgst`, `totalIgst`, `totalCess`, `totalGst`, `totalInvoiceValue`, `openFlagCount`, `outstandingReviewCount`, `varianceInvoiceCount`, `isStatutoryFilingReport: false`, and non-statutory operational `disclaimer`).
+- **Errors:** `401 UNAUTHENTICATED`, `404 WORKSPACE_NOT_FOUND`, `409 MIXED_CURRENCY_NOT_SUPPORTED`, `422 VALIDATION_ERROR`.
 
 ### `GET /api/v1/workspaces/{workspaceId}/reports/monthly-trend`
-- **Purpose:** Return chronological zero-filled monthly invoice counts and values derived dynamically from valid `invoiceDate` values.
-- **Auth:** Any active workspace member.
-- **Query Params:** `window=6m|12m|all` (default `6m`).
-- **Response (`200 OK`):** `{ "window": "6m", "buckets": [{ "monthKey": "2026-11", "label": "Nov 26", "totalCount": 3, "verifiedCount": 2, "pendingCount": 1, "flaggedCount": 0, "totalValue": "345000.00" }], "excludedCount": 0 }`.
+- **Purpose:** Return chronological zero-filled monthly invoice counts and `Decimal` values derived dynamically via PostgreSQL `DATE_TRUNC('month', invoice_date)`.
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`.
+- **Query Params:** `window=6m|12m|all` (default `6m`), optional `currency` (3-char ISO code).
+- **Mixed-Currency Guard:** Returns `409 MIXED_CURRENCY_NOT_SUPPORTED` if matching dated/workspace invoices span multiple currencies without a `currency` filter.
+- **Response (`200 OK`):** `{ "workspaceId": "uuid", "window": "6m", "currency": "INR", "buckets": [{ "monthKey": "2026-11", "label": "Nov 26", "totalCount": 3, "verifiedCount": 2, "pendingCount": 1, "flaggedCount": 0, "totalValue": "345000.00", "totalTaxableValue": "292372.88", "totalGst": "52627.12" }], "excludedCount": 0, "outOfWindowCount": 0 }` (`excludedCount` counts undated active invoices; `outOfWindowCount` counts dated invoices older than the selected `6m`/`12m` window).
+- **Errors:** `401 UNAUTHENTICATED`, `404 WORKSPACE_NOT_FOUND`, `409 MIXED_CURRENCY_NOT_SUPPORTED`, `422 VALIDATION_ERROR`.
 
 ### `GET /api/v1/workspaces/{workspaceId}/reports/exceptions`
-- **Purpose:** List `FLAGGED` invoices and unresolved `VARIANCE_DETECTED` / `VARIANCE_WARNING` records for exception reporting.
-- **Auth:** Any active workspace member.
-- **Response (`200 OK`):** `{ "items": [...] }`.
+- **Purpose:** List paginated active exception invoices (`status == 'FLAGGED'` or unresolved `reconciliationStatus == 'VARIANCE_DETECTED'` or `lineItemReconciliationStatus == 'VARIANCE_WARNING'`) with batched `OPEN` review flags and latest `ReviewAction` snippets (zero N+1 queries).
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `UPLOADER`, `VIEWER`.
+- **Query Params:** Optional `search` (`ILIKE` on invoice number, supplier name, GSTIN), `status` (`PENDING_REVIEW|VERIFIED|FLAGGED`), `flagCategory` (`ARITHMETIC_MISMATCH|DUPLICATE_SUSPICION|GSTIN_ISSUE|HSN_RATE_MISMATCH|MISSING_PO_GRN|FIELD_DISCREPANCY|CUSTOM`), `reconciliationStatus` (`MATCHED|WITHIN_ROUNDING_TOLERANCE|VARIANCE_DETECTED|PENDING_INPUT`), `dateFrom`, `dateTo` (`dateFrom > dateTo` -> `422`), `page` (`>= 1`, default `1`), `pageSize` (`1..100`, default `25`).
+- **Response (`200 OK`):** `{ "items": [{ "invoiceId": "uuid", "workspaceId": "uuid", "supplierId": "uuid", "invoiceNumber": "...", "supplierName": "...", "supplierGstin": "...", "invoiceDate": "2026-11-16", "uploadDate": "2026-11-17", "currency": "INR", "totalAmount": "55870.00", "varianceAmount": "1000.00", "lineItemVarianceAmount": null, "status": "FLAGGED", "reconciliationStatus": "VARIANCE_DETECTED", "lineItemReconciliationStatus": "NO_LINE_ITEMS", "duplicateWarning": null, "openFlagCount": 1, "openFlags": [{ "id": "uuid", "flagCategory": "ARITHMETIC_MISMATCH", "reasonText": "...", "createdByName": "CA Ananya Deshmukh", "createdAt": "..." }], "lastAction": { "id": "uuid", "actionType": "FLAG_INVOICE", "actorDisplayName": "CA Ananya Deshmukh", "comment": "...", "createdAt": "..." }, "updatedAt": "..." }], "total": 4, "page": 1, "pageSize": 25 }`.
+- **Errors:** `401 UNAUTHENTICATED`, `404 WORKSPACE_NOT_FOUND`, `422 VALIDATION_ERROR`.
 
 ### `GET /api/v1/workspaces/{workspaceId}/reports/export.csv`
-- **Purpose:** Generate RFC-4180 CSV register export with server-side formula-injection neutralization (`'=` prefixing) and record an `audit_events` log entry.
-- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `VIEWER`.
-- **Query Params:** Optional `status`, `dateFrom`, `dateTo`.
-- **Response (`200 OK`):** `text/csv; charset=utf-8` with `Content-Disposition: attachment; filename="norus-billwise-report-YYYY-MM-DD.csv"`.
+- **Purpose:** Stream an RFC-4180 UTF-8 CSV invoice register (`yield_per(500)`) with server-side whitespace/control-char-aware CSV formula-injection neutralization (prepending `'` before payloads whose stripped/raw start is `=`, `+`, `-`, `@`, `\t`, `\r`, or `\n` while preserving signed numeric `Decimal` amounts like `"-120.00"`), including `Due Date`, `Verified At`, and `Verified By` (`User.full_name`), enforcing `MAX_CSV_EXPORT_ROWS = 10,000`, and recording a `report.csv_exported` `audit_events` entry before streaming begins.
+- **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `VIEWER` (`UPLOADER` forbidden with `403 FORBIDDEN_ROLE`).
+- **Query Params:** Optional `status` (`PENDING_REVIEW|VERIFIED|FLAGGED`), `dateFrom`, `dateTo` (`dateFrom > dateTo` -> `422`), `currency` (3-char ISO code).
+- **Response (`200 OK`):** `text/csv; charset=utf-8` with `Content-Disposition: attachment; filename="norus-billwise-report-YYYY-MM-DD.csv"`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store`.
+- **Errors:** `401 UNAUTHENTICATED`, `403 FORBIDDEN_ROLE`, `404 WORKSPACE_NOT_FOUND`, `422 EXPORT_ROW_LIMIT_EXCEEDED`, `422 VALIDATION_ERROR`.
 
 ---
 
 ## 9. Audit History Endpoints
 
 ### `GET /api/v1/workspaces/{workspaceId}/audit-events`
-- **Purpose:** Retrieve chronological append-only workspace activity and compliance events (including soft-delete and auth/security events).
+- **Purpose:** Retrieve chronological append-only workspace activity and compliance events (including soft-delete and auth/security events) ordered deterministically by `created_at DESC, id DESC`. Write methods (`POST`, `PUT`, `PATCH`, `DELETE`) are not exposed and return `405 Method Not Allowed`.
 - **Auth:** `WORKSPACE_ADMIN`, `REVIEWER`, `VIEWER` (`UPLOADER` restricted to `actorUserId == currentUser.id`).
-- **Query Params:** `entityType`, `entityId`, `eventType`, `actorUserId`, `dateFrom`, `dateTo`, `page`, `pageSize`.
-- **Response (`200 OK`):**
+- **Query Params:** `entityType`, `entityId`, `eventType`, `actorUserId`, `dateFrom`, `dateTo` (`dateFrom > dateTo` -> `422 VALIDATION_ERROR`), `page` (`>= 1`, default `1`), `pageSize` (`1..100`, default `25`).
+- **Response (`200 OK`):** *(Note: internal `ipAddress` is omitted from API responses.)*
   ```json
   {
     "items": [
@@ -440,3 +447,4 @@
     "pageSize": 25
   }
   ```
+- **Errors:** `401 UNAUTHENTICATED`, `404 WORKSPACE_NOT_FOUND`, `405 METHOD_NOT_ALLOWED`, `422 VALIDATION_ERROR`.

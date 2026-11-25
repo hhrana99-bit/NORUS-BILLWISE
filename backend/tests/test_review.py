@@ -1133,3 +1133,131 @@ def test_review_atomic_rollback_csrf_and_concurrency(
     assert pa_res.status_code in {200, 409}
     if pa_res.status_code == 409:
         assert pa_res.json()["error"]["code"] == "VERIFIED_INVOICE_LOCKED"
+
+
+def test_flagging_verified_invoice_clears_verifier_and_history_page2_tie_breaking(
+    make_client: Callable[..., TestClient],
+    db_session: Session,
+) -> None:
+    ctx = _setup_review_workspace(make_client)
+    admin_client = ctx["admin_client"]
+    reviewer_client = ctx["reviewer_client"]
+    ws1_id = ctx["ws1_id"]
+
+    # Create and flag once, resolve, and verify so prior flags/actions/audit events exist
+    inv = _create_invoice(admin_client, ws1_id)
+    inv_id = inv["id"]
+
+    first_flag = admin_client.post(
+        f"/api/v1/workspaces/{ws1_id}/invoices/{inv_id}/flag",
+        headers=_csrf_headers(admin_client),
+        json={"flagCategory": "GSTIN_ISSUE", "reasonText": "Initial GSTIN verification check"},
+    )
+    assert first_flag.status_code == 200
+    first_flag_id = first_flag.json()["reviewFlags"][0]["id"]
+
+    resolve_first = reviewer_client.post(
+        f"/api/v1/workspaces/{ws1_id}/flags/{first_flag_id}/resolve",
+        headers=_csrf_headers(reviewer_client),
+        json={"resolutionStatus": "RESOLVED", "resolutionNote": "GSTIN matched portal"},
+    )
+    assert resolve_first.status_code == 200
+
+    verified_resp = reviewer_client.post(
+        f"/api/v1/workspaces/{ws1_id}/invoices/{inv_id}/verify",
+        headers=_csrf_headers(reviewer_client),
+        json={"confirmationNote": "Approved prior to audit spot-check"},
+    )
+    assert verified_resp.status_code == 200
+    assert verified_resp.json()["status"] == "VERIFIED"
+    assert verified_resp.json()["verifiedByUserId"] is not None
+    assert verified_resp.json()["verifiedAt"] is not None
+
+    # Flag directly from VERIFIED -> FLAGGED
+    post_verify_flag = admin_client.post(
+        f"/api/v1/workspaces/{ws1_id}/invoices/{inv_id}/flag",
+        headers=_csrf_headers(admin_client),
+        json={
+            "flagCategory": "CUSTOM",
+            "reasonText": "Post-verification spot audit discrepancy",
+        },
+    )
+    assert post_verify_flag.status_code == 200, post_verify_flag.text
+    flagged_json = post_verify_flag.json()
+    assert flagged_json["status"] == "FLAGGED"
+    assert flagged_json["verifiedByUserId"] is None
+    assert flagged_json["verifiedAt"] is None
+    assert flagged_json["openFlagCount"] == 1
+    assert len(flagged_json["reviewFlags"]) == 2
+    assert flagged_json["reviewFlags"][0]["status"] == "RESOLVED"
+    assert flagged_json["reviewFlags"][1]["status"] == "OPEN"
+
+    # Full history preserves prior FLAG_INVOICE, RESOLVE_FLAG, MARK_VERIFIED, and appends new FLAG_INVOICE
+    full_hist = reviewer_client.get(
+        f"/api/v1/workspaces/{ws1_id}/invoices/{inv_id}/review-history",
+        params={"order": "asc", "page": 1, "pageSize": 20},
+    )
+    assert full_hist.status_code == 200
+    fh = full_hist.json()
+    assert fh["totalActions"] == 4
+    assert [a["actionType"] for a in fh["actions"]] == [
+        "FLAG_INVOICE",
+        "RESOLVE_FLAG",
+        "MARK_VERIFIED",
+        "FLAG_INVOICE",
+    ]
+    assert fh["actions"][3]["previousStatus"] == "VERIFIED"
+    assert fh["actions"][3]["newStatus"] == "FLAGGED"
+    assert any(
+        evt["eventType"] == "invoice.flagged"
+        and evt["metadata"].get("previousStatus") == "VERIFIED"
+        for evt in fh["auditEvents"]
+    )
+
+    # Equal timestamps across review_actions must paginate deterministically across page=1 and page=2
+    tied_ts = utc_now()
+    inv_uuid = uuid.UUID(inv_id)
+    action_rows = list(
+        db_session.scalars(
+            select(ReviewAction).where(ReviewAction.invoice_id == inv_uuid)
+        )
+    )
+    for row in action_rows:
+        row.created_at = tied_ts
+    db_session.commit()
+
+    expected_asc_ids = [
+        str(row.id) for row in sorted(action_rows, key=lambda r: (r.created_at, str(r.id)))
+    ]
+
+    p1_asc = reviewer_client.get(
+        f"/api/v1/workspaces/{ws1_id}/invoices/{inv_id}/review-history",
+        params={"order": "asc", "page": 1, "pageSize": 2},
+    )
+    p2_asc = reviewer_client.get(
+        f"/api/v1/workspaces/{ws1_id}/invoices/{inv_id}/review-history",
+        params={"order": "asc", "page": 2, "pageSize": 2},
+    )
+    assert p1_asc.status_code == 200
+    assert p2_asc.status_code == 200
+    p1_ids = [a["id"] for a in p1_asc.json()["actions"]]
+    p2_ids = [a["id"] for a in p2_asc.json()["actions"]]
+    assert p1_asc.json()["page"] == 1
+    assert p2_asc.json()["page"] == 2
+    assert len(p1_ids) == 2 and len(p2_ids) == 2
+    assert p1_ids + p2_ids == expected_asc_ids
+
+    p1_desc = reviewer_client.get(
+        f"/api/v1/workspaces/{ws1_id}/invoices/{inv_id}/review-history",
+        params={"order": "desc", "page": 1, "pageSize": 2},
+    )
+    p2_desc = reviewer_client.get(
+        f"/api/v1/workspaces/{ws1_id}/invoices/{inv_id}/review-history",
+        params={"order": "desc", "page": 2, "pageSize": 2},
+    )
+    assert p1_desc.status_code == 200 and p2_desc.status_code == 200
+    desc_ids = [a["id"] for a in p1_desc.json()["actions"]] + [
+        a["id"] for a in p2_desc.json()["actions"]
+    ]
+    assert desc_ids == list(reversed(expected_asc_ids))
+

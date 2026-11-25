@@ -2,22 +2,22 @@
 
 **Company:** NORUS AI  
 **Product:** NORUS BILLWISE (*Beyond the World.*)  
-**Milestone:** Task 002.6 Implemented Human Review Workflow, Exception Flags & Immutable Audit Ledger *(Tasks 002.2–002.6 implemented for Auth, Tenancy/RBAC, Suppliers, Document Storage, Invoices/Reconciliation, and Human Review Workflow; Reports, Frontend API wiring, and S3/ClamAV remain pending)*  
-**Document Status:** Task 002.6 Milestone (based on verified `main` `bfa17947`; see `docs/STATUS.md` for live progress)
+**Milestone:** Task 002.7 Implemented Reports API, Formula-Safe CSV Export & Frontend Workspace API Integration *(Tasks 002.2–002.7 implemented across Auth, Tenancy/RBAC, Suppliers, Document Storage, Invoices/Reconciliation, Human Review Workflow, Reports/CSV Export, and React SPA API integration; ClamAV malware scanning and S3/MinIO object storage remain pending for Task 002.8)*  
+**Document Status:** Task 002.7 Milestone (based on verified `main` `7d4783dc`; see `docs/STATUS.md` for live progress)
 
 ---
 
 ## 1. Current State vs. Proposed Target Boundary
 
-| Layer / Capability | Current Prototype (Task 001–001.3 Implemented) | Proposed Backend (Task 002.x Target Design) |
+| Layer / Capability | Current Integrated Full-Stack MVP (Task 002.7 Implemented) | Production Target (Task 002.8+ / Task 003+) |
 | :--- | :--- | :--- |
-| **Runtime & Persistence** | React 19 SPA (`WorkspaceContext`) + browser `localStorage` (`schemaVersion: 2`) | React 19 SPA communicating via camelCase REST with Python FastAPI + PostgreSQL 16+ |
-| **Data Set** | Fictional Indian GST sample data (`src/data/mockData.ts`) | Multi-tenant relational data scoped strictly by `organization_id` and `workspace_id` |
-| **Document Storage** | Browser-local `URL.createObjectURL` blobs (ephemeral per tab) | S3-compatible / local-filesystem object storage abstraction (`Document` metadata in PostgreSQL) |
-| **Auth & Tenancy** | Single active workspace preset (`WS-IN-MUM-001`), no login/session | Argon2id credentials, `HttpOnly`/`Secure`/`SameSite` cookie sessions, CSRF protection, revocable refresh rotation, strict RBAC |
-| **Invoice Math** | `Taxable + CGST + SGST + IGST === Total` check (`invoiceService.ts`) | Flexible GST + line-item reconciliation (`discount`, `cess`, `freight`, `other_charges`, `round_off`, advisory line-item checks) |
-| **Human Review Gate** | Enforced in UI (`requireHumanReview: true`) | Enforced by backend domain rules, API permissions, and immutable `review_actions` |
-| **OCR & AI Extraction** | Not implemented (manual entry on local demo staging) | Out of scope for Task 002 core; async worker seam reserved for Task 003+ |
+| **Runtime & Persistence** | React 19 SPA (`WorkspaceContext` + `apiClient`) communicating via camelCase REST with Python FastAPI + PostgreSQL 16+ (plus browser-only `localStorage` UI density prefs) | Same API boundary with HTTPS edge proxy, automated PostgreSQL PITR backups, and monitoring |
+| **Data Set** | Multi-tenant PostgreSQL relational data scoped strictly by `organization_id` and `workspace_id` | Same multi-tenant isolation enforced with optional PostgreSQL RLS defense-in-depth |
+| **Document Storage** | `DocumentStorage` port backed by `LocalFilesystemStorage` (`scanStatus = 'PENDING'` until scanned) | Encrypted `S3`/`MinIO` `DocumentStorage` adapter + ClamAV scan pipeline (`CLEAN` transition) |
+| **Auth & Tenancy** | Argon2id credentials, `HttpOnly`/`SameSite=Lax` cookie sessions, CSRF protection, revocable refresh rotation, strict RBAC | Email verification, password reset, and workspace quota controls (Task 002.8+) |
+| **Invoice Math** | Flexible `Decimal` GST + line-item reconciliation (`discount`, `cess`, `freight`, `other_charges`, `round_off`, advisory line-item checks) | Same deterministic server-side `Decimal` reconciliation engine |
+| **Human Review Gate** | Enforced by backend domain rules, RBAC permissions, `FOR UPDATE` locks, and immutable `review_actions` | Same mandatory human gate across future OCR/AI suggestions |
+| **OCR & AI Extraction** | Not implemented (manual entry/editing against uploaded documents) | Async OCR/AI extraction worker seam reserved for Task 003+ |
 
 ---
 
@@ -100,9 +100,11 @@ NORUS BILLWISE targets a **cleanly layered Python FastAPI modular monolith** bac
    - Edits via `PATCH /invoices/{invoiceId}` recompute header totals and advisory line-item reconciliation server-side and log `ReviewAction(actionType="SAVE_EDITS")` without changing approval state.
    - `POST /invoices/{invoiceId}/verify` requires an authorized human user (`REVIEWER` or `WORKSPACE_ADMIN`) under a `FOR UPDATE` row lock (strictly `Invoice -> InvoiceReviewFlag` lock order across all review mutations to prevent deadlocks), enforces mandatory field verification, rejects unacknowledged header or line-item variances (`409 VARIANCE_ACKNOWLEDGMENT_REQUIRED` until `confirmVarianceAcknowledgment = true` with non-blank `confirmationNote`), transitions the invoice to `VERIFIED`, writes an immutable `review_actions` record, and appends to `audit_events`.
    - `POST /invoices/{invoiceId}/flag`, `POST /flags/{flagId}/resolve`, and `POST /invoices/{invoiceId}/reopen` manage exception lifecycles while preserving all resolved flags, review actions, and audit logs (exposed chronologically and sanitized via `GET /invoices/{invoiceId}/review-history`).
-4. **Reporting & Formula-Safe CSV Export:**
-   - `GET /reports/summary` and `GET /reports/monthly-trend` aggregate PostgreSQL records directly using `DATE_TRUNC('month', invoice_date)` and exact `NUMERIC` sums.
-   - `GET /reports/export.csv` streams RFC-4180 CSV with server-side formula-injection sanitization (`=`, `+`, `-`, `@`, `\t`, `\r`) and records an export audit event.
+4. **Reporting & Formula-Safe CSV Export (`backend/app/services/report_service.py`):**
+   - `GET /reports/summary` computes live PostgreSQL `NUMERIC` KPI and GST totals using single-query aggregations (without join fan-out double counting) plus an `OPEN` flag count query and mixed-currency `409` protection.
+   - `GET /reports/monthly-trend` returns chronological zero-filled monthly counts and totals using `DATE_TRUNC('month', invoice_date)` (`excludedCount` and `outOfWindowCount` tracked explicitly).
+   - `GET /reports/exceptions` serves a paginated feed of `FLAGGED` and unresolved variance invoices with batched `OPEN` flags and latest `ReviewAction` snippets.
+   - `GET /reports/export.csv` streams RFC-4180 UTF-8 CSV (`yield_per(500)`) with whitespace/control-char-aware formula-injection sanitization (preserving signed negative `Decimal` amounts), enforces `MAX_CSV_EXPORT_ROWS = 10_000`, restricts `UPLOADER`, and logs `report.csv_exported` in `audit_events`.
 
 ---
 
@@ -239,7 +241,8 @@ Each task below is designed to be small, independently testable via `pytest` + P
 | **Task 002.4** | `suppliers` & `documents` tables, `DocumentStorage` interface (`LocalFSAdapter`), secure magic-byte upload & streaming preview endpoints, Supplier CRUD & summary aggregation | Task 002.3 | Upload validation tests (reject spoofed `.exe`/`.txt`), supplier endpoints & tenant checks pass |
 | **Task 002.5** | `invoices`, `invoice_line_items`, `invoice_field_verifications` tables, flexible Indian GST reconciliation engine (`Decimal`), duplicate detection service, Invoices CRUD/search/filter/sort | Task 002.4 | Unit + integration tests for discounts, cess, freight, round-off, variance, and search/sort pass |
 | **Task 002.6** | `invoice_review_flags`, `review_actions`, `audit_events` tables; `/verify`, `/flag`, `/flags/{id}/resolve`, `/reopen`, `/review-history`, `/audit-events` endpoints; enforced human-review gate | Task 002.5 | Tests verify variance requires confirmation, verified bills reject silent mutation, audit log is append-only |
-| **Task 002.7** | Reports endpoints (`/reports/summary`, `/monthly-trend`, `/exceptions`, `/export.csv` with formula sanitization) + React `WorkspaceContext` API client integration & Docker Compose dev stack | Task 002.6 | End-to-end Playwright + FastAPI integration test across all 6 UI routes passes |
+| **Task 002.7** | Reports endpoints (`/reports/summary`, `/monthly-trend`, `/exceptions`, `/export.csv` with formula sanitization), `/audit-events` tie-break/date validation, and React `WorkspaceContext` + `apiClient` full-stack integration | Task 002.6 | Backend `test_reports_and_audit.py` + Frontend `tests/apiClient.test.ts` pass; live Playwright + FastAPI + PG16 verification pending CI/staging |
+| **Task 002.8** | ClamAV malware scanning (`PENDING -> CLEAN | INFECTED | FAILED`), upload/stream rate limits, encrypted `S3`/`MinIO` `DocumentStorage` adapter, pilot HTTPS config, and live Playwright + FastAPI verification | Task 002.7 | Uploaded documents stream safely as `CLEAN`; full-stack Playwright E2E passes against live FastAPI + PG16 |
 
 ---
 

@@ -4,9 +4,11 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from fastapi import status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.errors import AppError
 from app.models.review import AuditEvent
 from app.models.tenancy import User
 
@@ -64,6 +66,13 @@ def list_workspace_audit_events(
     page_size: int = 25,
 ) -> tuple[list[AuditEvent], int]:
     """Return paginated audit events strictly scoped to a single workspace."""
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise AppError(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            code="VALIDATION_ERROR",
+            message="dateFrom cannot be after dateTo.",
+        )
+
     conditions = [AuditEvent.workspace_id == workspace_id]
 
     if restrict_to_actor_user_id is not None:
@@ -87,7 +96,7 @@ def list_workspace_audit_events(
         db.scalars(
             select(AuditEvent)
             .where(*conditions)
-            .order_by(AuditEvent.created_at.desc())
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
             .offset((page - 1) * page_size)
             .limit(page_size)
         )

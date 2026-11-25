@@ -3,7 +3,9 @@ import {
   CheckCircle2,
   FileText,
   Flag,
-  Info,
+  History,
+  Lock,
+  RotateCcw,
   Save,
   ShieldAlert,
   Trash2,
@@ -14,45 +16,79 @@ import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { EmptyState } from '../components/common/EmptyState';
 import { DocumentPreview } from '../components/invoices/DocumentPreview';
 import { FlagInvoiceModal } from '../components/invoices/FlagInvoiceModal';
-import { formatINR } from '../services/formatters';
+import { formatApiErrorMessage } from '../services/apiClient';
+import { formatDateIN, formatINR } from '../services/formatters';
 import {
   computeArithmeticCheck,
-  detectDuplicateWarning,
   hasUnsavedInvoiceChanges,
 } from '../services/invoiceService';
 import { useWorkspace } from '../state/WorkspaceContext';
 import type {
+  ApiReviewFlag,
   FieldVerificationStatus,
+  FlagCategory,
   Invoice,
   InvoiceFieldKey,
 } from '../types/domain';
 
 export function ReviewCentrePage() {
   const {
+    activeWorkspaceId,
+    activeWorkspaceRole,
     invoices,
     settings,
     selectedInvoiceId,
+    selectedInvoiceDetail,
+    selectedReviewHistory,
+    detailLoading,
+    detailError,
+    mutationInFlight,
     selectInvoiceForReview,
+    refreshSelectedInvoiceDetail,
     setHasUnsavedReviewChanges,
     pendingNavigation,
     cancelPendingNavigation,
     commitPendingNavigation,
-    updateInvoice,
-    deleteLocalInvoice,
+    saveInvoiceChanges,
+    verifyInvoiceAction,
+    flagInvoiceAction,
+    resolveFlagAction,
+    reopenInvoiceAction,
+    deleteInvoiceAction,
     navigate,
   } = useWorkspace();
 
   const currentInvoice =
-    invoices.find((inv) => inv.id === selectedInvoiceId) ?? invoices[0];
+    selectedInvoiceDetail ??
+    invoices.find((inv) => inv.id === selectedInvoiceId) ??
+    invoices[0];
 
   const [draftState, setDraft] = useState<Invoice | undefined>(currentInvoice);
-  const [focusedField, setFocusedField] = useState<InvoiceFieldKey | null>(null);
+  const [focusedField, setFocusedField] = useState<InvoiceFieldKey | null>(
+    null
+  );
   const [feedbackBanner, setFeedbackBanner] = useState<string>('');
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const [flagModalOpen, setFlagModalOpen] = useState(false);
-  const [verifyMismatchOpen, setVerifyMismatchOpen] = useState(false);
+  const [verifyDialogOpen, setVerifyDialogOpen] = useState(false);
+  const [verifyAckVariance, setVerifyAckVariance] = useState(false);
+  const [verifyNote, setVerifyNote] = useState('');
+  const [verifyResolveOpenFlags, setVerifyResolveOpenFlags] = useState(false);
+  const [verifyFlagNote, setVerifyFlagNote] = useState('');
+
+  const [resolvingFlag, setResolvingFlag] = useState<ApiReviewFlag | null>(null);
+  const [resolveStatus, setResolveStatus] = useState<'RESOLVED' | 'DISMISSED'>(
+    'RESOLVED'
+  );
+  const [resolveNote, setResolveNote] = useState('');
+  const [resolveReopenToPending, setResolveReopenToPending] = useState(true);
+
+  const [reopenDialogOpen, setReopenDialogOpen] = useState(false);
+  const [reopenReason, setReopenReason] = useState('');
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+
   const prevInvoiceIdRef = useRef<string | undefined>(currentInvoice?.id);
-  const suppressBannerClearRef = useRef(false);
 
   const draft =
     draftState && currentInvoice && draftState.id === currentInvoice.id
@@ -66,13 +102,12 @@ export function ReviewCentrePage() {
 
     if (prevId !== nextId) {
       prevInvoiceIdRef.current = nextId;
-      if (suppressBannerClearRef.current) {
-        suppressBannerClearRef.current = false;
-      } else {
-        setFeedbackBanner('');
-      }
+      setFeedbackBanner('');
+      setActionError(null);
       setFlagModalOpen(false);
-      setVerifyMismatchOpen(false);
+      setVerifyDialogOpen(false);
+      setResolvingFlag(null);
+      setReopenDialogOpen(false);
       setDeleteDialogOpen(false);
     }
   }, [currentInvoice]);
@@ -99,13 +134,21 @@ export function ReviewCentrePage() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [hasUnsavedChanges]);
 
+  if (detailLoading && !draft) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-xs text-slate-500">
+        Loading invoice review workspace...
+      </div>
+    );
+  }
+
   if (!draft) {
     return (
       <div className="rounded-xl border border-slate-200 bg-white">
         <EmptyState
           icon={<FileText className="h-5 w-5" />}
           title="No invoices available to review"
-          description="Upload a sample PDF or image in Invoices, or restore the demo register from Settings."
+          description="Upload a PDF or image invoice or create a manual entry in the Invoices register."
           action={
             <button
               type="button"
@@ -120,10 +163,31 @@ export function ReviewCentrePage() {
     );
   }
 
+  const isReviewerOrAdmin =
+    activeWorkspaceRole === 'WORKSPACE_ADMIN' ||
+    activeWorkspaceRole === 'REVIEWER';
+  const isWorkspaceAdmin = activeWorkspaceRole === 'WORKSPACE_ADMIN';
+  const isUploader = activeWorkspaceRole === 'UPLOADER';
+  const isViewer = activeWorkspaceRole === 'VIEWER';
+
+  const isVerifiedLocked = draft.status === 'Verified';
+  const isUploaderFlagLocked = isUploader && draft.status === 'Flagged';
+  const canEditFields = !isViewer && !isVerifiedLocked && !isUploaderFlagLocked;
+
   const check = computeArithmeticCheck(draft);
+  const openFlags = (draft.reviewFlags ?? []).filter(
+    (f) => f.status === 'OPEN'
+  );
+  const hasServerVariance =
+    draft.reconciliationStatus === 'VARIANCE_DETECTED' || !check.isBalanced;
   const activeDuplicateWarning = settings.enableDuplicateWarnings
-    ? detectDuplicateWarning(draft, invoices)
+    ? draft.duplicateWarning
     : undefined;
+
+  const canReopen =
+    isReviewerOrAdmin &&
+    (draft.status === 'Verified' ||
+      (draft.status === 'Flagged' && openFlags.length === 0));
 
   const updateTextField = (
     key: 'supplierName' | 'supplierGstin' | 'invoiceNumber' | 'invoiceDate',
@@ -155,7 +219,10 @@ export function ReviewCentrePage() {
     );
   };
 
-  const setFieldStatus = (key: InvoiceFieldKey, status: FieldVerificationStatus) => {
+  const setFieldStatus = (
+    key: InvoiceFieldKey,
+    status: FieldVerificationStatus
+  ) => {
     setDraft((prev) =>
       prev
         ? {
@@ -172,69 +239,142 @@ export function ReviewCentrePage() {
     );
   };
 
-  const handleSaveChanges = () => {
-    updateInvoice(draft, 'Saved manual edits in Review Centre');
-    setFeedbackBanner('Changes saved to local prototype state.');
+  const handleSaveChanges = async () => {
+    if (!currentInvoice || !canEditFields) return;
+    setActionError(null);
+    setFeedbackBanner('');
+    try {
+      await saveInvoiceChanges(currentInvoice, draft);
+      setFeedbackBanner('Changes saved to database.');
+    } catch (err) {
+      setActionError(formatApiErrorMessage(err));
+    }
   };
 
-  const executeVerify = (confirmedWithMismatch: boolean) => {
-    const nextFieldMeta = { ...draft.fieldMeta };
-    (Object.keys(nextFieldMeta) as InvoiceFieldKey[]).forEach((key) => {
-      nextFieldMeta[key] = { ...nextFieldMeta[key], status: 'Verified' };
-    });
-
-    const verifiedInvoice: Invoice = {
-      ...draft,
-      status: 'Verified',
-      flagReason: undefined,
-      fieldMeta: nextFieldMeta,
-    };
-    setDraft(verifiedInvoice);
-    updateInvoice(
-      verifiedInvoice,
-      confirmedWithMismatch
-        ? `Marked invoice as Verified after human confirmation despite ${formatINR(Math.abs(check.difference))} variance`
-        : 'Marked invoice as Verified after human review'
-    );
-    setVerifyMismatchOpen(false);
-    setFeedbackBanner(
-      confirmedWithMismatch
-        ? 'Invoice verified with explicit human confirmation of variance. Amounts left unchanged.'
-        : 'Invoice marked as Verified. Dashboard and Reports updated.'
-    );
+  const openVerifyModal = () => {
+    setActionError(null);
+    setVerifyAckVariance(false);
+    setVerifyNote('');
+    setVerifyResolveOpenFlags(openFlags.length > 0);
+    setVerifyFlagNote('');
+    setVerifyDialogOpen(true);
   };
 
-  const handleVerifyClick = () => {
-    if (!check.isBalanced) {
-      setVerifyMismatchOpen(true);
+  const handleVerifySubmit = async () => {
+    if (!currentInvoice || !isReviewerOrAdmin) return;
+    setActionError(null);
+    setFeedbackBanner('');
+
+    if (hasServerVariance && !verifyAckVariance) {
+      setActionError(
+        'Acknowledge the reconciliation variance before verifying this invoice.'
+      );
       return;
     }
-    executeVerify(false);
+    if (openFlags.length > 0 && !verifyResolveOpenFlags) {
+      setActionError(
+        'Resolve open flags before verifying, or enable "Resolve open flags during verification".'
+      );
+      return;
+    }
+    if (openFlags.length > 0 && verifyResolveOpenFlags && !verifyFlagNote.trim()) {
+      setActionError('Provide a flag resolution note to resolve open flags.');
+      return;
+    }
+
+    try {
+      if (hasUnsavedChanges) {
+        await saveInvoiceChanges(currentInvoice, draft);
+      }
+      await verifyInvoiceAction(draft.id, {
+        confirmVarianceAcknowledgment: hasServerVariance
+          ? verifyAckVariance
+          : false,
+        confirmationNote: verifyNote.trim(),
+        resolveOpenFlags: openFlags.length > 0 ? verifyResolveOpenFlags : false,
+        flagResolutionNote:
+          openFlags.length > 0 && verifyResolveOpenFlags
+            ? verifyFlagNote.trim()
+            : undefined,
+      });
+      setVerifyDialogOpen(false);
+      setFeedbackBanner(
+        'Invoice marked as Verified after human review. Record is now locked for audit integrity.'
+      );
+    } catch (err) {
+      setActionError(formatApiErrorMessage(err));
+    }
   };
 
-  const handleConfirmFlag = (reason: string) => {
-    const flaggedInvoice: Invoice = {
-      ...draft,
-      status: 'Flagged',
-      flagReason: reason,
-    };
-    setDraft(flaggedInvoice);
-    updateInvoice(flaggedInvoice, `Flagged invoice for review: ${reason}`);
-    setFlagModalOpen(false);
-    setFeedbackBanner('Invoice flagged for review.');
+  const handleConfirmFlag = async (
+    flagCategory: FlagCategory,
+    reasonText: string
+  ) => {
+    if (!currentInvoice || !isReviewerOrAdmin) return;
+    setActionError(null);
+    setFeedbackBanner('');
+    try {
+      if (hasUnsavedChanges) {
+        await saveInvoiceChanges(currentInvoice, draft);
+      }
+      await flagInvoiceAction(draft.id, { flagCategory, reasonText });
+      setFlagModalOpen(false);
+      setFeedbackBanner('Invoice flagged and held for secondary review.');
+    } catch (err) {
+      setActionError(formatApiErrorMessage(err));
+    }
   };
 
-  const handleConfirmDeleteLocal = () => {
+  const handleResolveFlagSubmit = async () => {
+    if (!resolvingFlag || !isReviewerOrAdmin) return;
+    if (!resolveNote.trim()) {
+      setActionError('Resolution note is required.');
+      return;
+    }
+    setActionError(null);
+    setFeedbackBanner('');
+    try {
+      await resolveFlagAction(resolvingFlag.id, {
+        resolutionStatus: resolveStatus,
+        resolutionNote: resolveNote.trim(),
+        reopenToPending: resolveReopenToPending,
+      });
+      setResolvingFlag(null);
+      setResolveNote('');
+      setFeedbackBanner(`Flag ${resolveStatus.toLowerCase()} cleanly.`);
+    } catch (err) {
+      setActionError(formatApiErrorMessage(err));
+    }
+  };
+
+  const handleReopenSubmit = async () => {
+    if (!isReviewerOrAdmin) return;
+    if (!reopenReason.trim()) {
+      setActionError('Enter a reason to reopen this invoice to Pending Review.');
+      return;
+    }
+    setActionError(null);
+    setFeedbackBanner('');
+    try {
+      await reopenInvoiceAction(draft.id, reopenReason.trim());
+      setReopenDialogOpen(false);
+      setReopenReason('');
+      setFeedbackBanner('Invoice reopened to Pending Review.');
+    } catch (err) {
+      setActionError(formatApiErrorMessage(err));
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!isWorkspaceAdmin) return;
     const deletedNumber = draft.invoiceNumber;
     setDeleteDialogOpen(false);
-    suppressBannerClearRef.current = true;
-    const removed = deleteLocalInvoice(draft.id);
-    if (removed) {
-      setFeedbackBanner(
-        `Locally staged demo invoice ${deletedNumber} was removed from browser state.`
-      );
-    } else {
-      suppressBannerClearRef.current = false;
+    setActionError(null);
+    try {
+      await deleteInvoiceAction(draft.id, 'Deleted from Review Centre');
+      setFeedbackBanner(`Invoice ${deletedNumber} was soft-deleted.`);
+    } catch (err) {
+      setActionError(formatApiErrorMessage(err));
     }
   };
 
@@ -242,12 +382,13 @@ export function ReviewCentrePage() {
     const status = draft.fieldMeta[fieldKey].status;
     return (
       <select
+        disabled={!canEditFields}
         value={status}
         onChange={(e) =>
           setFieldStatus(fieldKey, e.target.value as FieldVerificationStatus)
         }
         aria-label={`Verification status for ${fieldKey}`}
-        className={`rounded-md border px-2 py-0.5 text-[11px] font-medium focus:outline-none ${
+        className={`rounded-md border px-2 py-0.5 text-[11px] font-medium focus:outline-none disabled:cursor-not-allowed disabled:opacity-70 ${
           status === 'Verified'
             ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
             : status === 'Flagged'
@@ -255,7 +396,7 @@ export function ReviewCentrePage() {
               : 'border-amber-200 bg-amber-50 text-amber-700'
         }`}
       >
-        <option value="Verified">Verified</option>
+        {!isUploader && <option value="Verified">Verified</option>}
         <option value="Needs Review">Needs Review</option>
         <option value="Flagged">Flagged</option>
       </select>
@@ -270,16 +411,6 @@ export function ReviewCentrePage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start gap-2.5 rounded-xl border border-indigo-200 bg-indigo-50/70 px-4 py-3 text-xs text-indigo-950">
-        <Info className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
-        <p>
-          <strong>Frontend Prototype Notice:</strong> Field values shown here are
-          mock accounting records (or locally staged files). Real OCR, bounding-box
-          source evidence, and AI-assisted field suggestions will be integrated in a
-          later development task. Human sign-off is always required.
-        </p>
-      </div>
-
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2.5 sm:gap-3">
           <label
@@ -310,43 +441,117 @@ export function ReviewCentrePage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {draft.isLocalUpload && (
+          {isWorkspaceAdmin && draft.status !== 'Verified' && (
             <button
               type="button"
+              disabled={mutationInFlight}
               onClick={() => setDeleteDialogOpen(true)}
-              aria-label={`Delete locally staged invoice ${draft.invoiceNumber}`}
-              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-rose-600 hover:border-rose-200 hover:bg-rose-50 whitespace-nowrap"
+              aria-label={`Soft-delete invoice ${draft.invoiceNumber}`}
+              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-rose-600 hover:border-rose-200 hover:bg-rose-50 whitespace-nowrap disabled:opacity-50"
             >
               <Trash2 className="h-3.5 w-3.5" />
-              Delete Local Draft
+              Delete
             </button>
           )}
-          <button
-            type="button"
-            onClick={handleSaveChanges}
-            className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-4 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap"
-          >
-            <Save className="h-3.5 w-3.5" />
-            Save Changes
-          </button>
-          <button
-            type="button"
-            onClick={() => setFlagModalOpen(true)}
-            className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-4 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap"
-          >
-            <Flag className="h-3.5 w-3.5" />
-            Flag for Review
-          </button>
-          <button
-            type="button"
-            onClick={handleVerifyClick}
-            className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-emerald-600 px-4 text-xs font-semibold text-white hover:bg-emerald-700 whitespace-nowrap"
-          >
-            <CheckCircle2 className="h-3.5 w-3.5" />
-            Mark as Verified
-          </button>
+          {canEditFields && (
+            <button
+              type="button"
+              disabled={mutationInFlight || !hasUnsavedChanges}
+              onClick={() => void handleSaveChanges()}
+              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-4 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Save className="h-3.5 w-3.5" />
+              Save Changes
+            </button>
+          )}
+          {canReopen && (
+            <button
+              type="button"
+              disabled={mutationInFlight}
+              onClick={() => {
+                setActionError(null);
+                setReopenReason('');
+                setReopenDialogOpen(true);
+              }}
+              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-4 text-xs font-semibold text-amber-800 hover:bg-amber-100 whitespace-nowrap disabled:opacity-50"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              Reopen
+            </button>
+          )}
+          {isReviewerOrAdmin && (
+            <>
+              <button
+                type="button"
+                disabled={mutationInFlight}
+                onClick={() => {
+                  setActionError(null);
+                  setFlagModalOpen(true);
+                }}
+                className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-4 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap disabled:opacity-50"
+              >
+                <Flag className="h-3.5 w-3.5" />
+                Flag for Review
+              </button>
+              {!isVerifiedLocked && (
+                <button
+                  type="button"
+                  disabled={mutationInFlight}
+                  onClick={openVerifyModal}
+                  className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-emerald-600 px-4 text-xs font-semibold text-white hover:bg-emerald-700 whitespace-nowrap disabled:opacity-50"
+                >
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                  Mark as Verified
+                </button>
+              )}
+            </>
+          )}
         </div>
       </div>
+
+      {isVerifiedLocked && (
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-2.5 text-xs text-emerald-950">
+          <div className="flex items-center gap-2">
+            <Lock className="h-4 w-4 shrink-0 text-emerald-600" />
+            <span>
+              <strong>Verified Record Locked:</strong> Accounting fields are
+              read-only after human sign-off.{' '}
+              {draft.verifiedAt
+                ? `Verified on ${new Date(draft.verifiedAt).toLocaleString('en-IN')}.`
+                : ''}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {(isViewer || isUploaderFlagLocked) && (
+        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-100 px-4 py-2.5 text-xs text-slate-700">
+          <Lock className="h-4 w-4 shrink-0 text-slate-500" />
+          <span>
+            {isViewer
+              ? 'Read-only access: your Viewer role cannot edit invoice fields or perform sign-off.'
+              : 'Flagged invoice locked for Uploader role until a Reviewer resolves or reopens it.'}
+          </span>
+        </div>
+      )}
+
+      {(detailError || actionError) && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rose-200 bg-rose-50 px-4 py-2.5 text-xs font-medium text-rose-800"
+        >
+          <span>{actionError ?? detailError}</span>
+          {detailError && (
+            <button
+              type="button"
+              onClick={() => void refreshSelectedInvoiceDetail()}
+              className="rounded border border-rose-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-rose-800"
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      )}
 
       {feedbackBanner && (
         <div
@@ -361,15 +566,34 @@ export function ReviewCentrePage() {
         <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
           <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
           <div>
-            <span className="font-semibold">Duplicate Warning (Advisory Only): </span>
+            <span className="font-semibold">
+              Duplicate Warning (Advisory Only):{' '}
+            </span>
             <span>{activeDuplicateWarning}</span>
+            {draft.duplicateMatches && draft.duplicateMatches.length > 0 && (
+              <ul className="mt-1 list-disc pl-4 text-[11px] text-amber-900">
+                {draft.duplicateMatches.map((match) => (
+                  <li key={match.invoiceId}>
+                    <button
+                      type="button"
+                      onClick={() => selectInvoiceForReview(match.invoiceId)}
+                      className="font-mono font-semibold underline"
+                    >
+                      {match.invoiceNumber}
+                    </button>{' '}
+                    ({match.status}) — {match.matchReasons.join(', ')}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
       )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        <div className="h-[480px] sm:h-[580px] lg:col-span-6 lg:h-[760px]">
+        <div className="h-[480px] sm:h-[580px] lg:col-span-6 lg:h-[780px]">
           <DocumentPreview
+            workspaceId={activeWorkspaceId}
             invoice={draft}
             focusedField={focusedField}
             settings={settings}
@@ -383,7 +607,8 @@ export function ReviewCentrePage() {
                 Supplier &amp; Invoice Metadata
               </h2>
               <p className="text-xs text-slate-500">
-                Focus any field to highlight the corresponding document block
+                Verify supplier identity, GSTIN, and invoice metadata against
+                the source document
               </p>
             </div>
 
@@ -397,11 +622,14 @@ export function ReviewCentrePage() {
                 </div>
                 <input
                   type="text"
+                  disabled={!canEditFields}
                   value={draft.supplierName}
                   onFocus={() => setFocusedField('supplierName')}
                   onBlur={() => setFocusedField(null)}
-                  onChange={(e) => updateTextField('supplierName', e.target.value)}
-                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+                  onChange={(e) =>
+                    updateTextField('supplierName', e.target.value)
+                  }
+                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:bg-slate-50"
                 />
                 {renderEvidenceLine('supplierName')}
               </div>
@@ -415,11 +643,14 @@ export function ReviewCentrePage() {
                 </div>
                 <input
                   type="text"
+                  disabled={!canEditFields}
                   value={draft.supplierGstin}
                   onFocus={() => setFocusedField('supplierGstin')}
                   onBlur={() => setFocusedField(null)}
-                  onChange={(e) => updateTextField('supplierGstin', e.target.value)}
-                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+                  onChange={(e) =>
+                    updateTextField('supplierGstin', e.target.value)
+                  }
+                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:bg-slate-50"
                 />
                 {renderEvidenceLine('supplierGstin')}
               </div>
@@ -433,11 +664,14 @@ export function ReviewCentrePage() {
                 </div>
                 <input
                   type="text"
+                  disabled={!canEditFields}
                   value={draft.invoiceNumber}
                   onFocus={() => setFocusedField('invoiceNumber')}
                   onBlur={() => setFocusedField(null)}
-                  onChange={(e) => updateTextField('invoiceNumber', e.target.value)}
-                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+                  onChange={(e) =>
+                    updateTextField('invoiceNumber', e.target.value)
+                  }
+                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:bg-slate-50"
                 />
                 {renderEvidenceLine('invoiceNumber')}
               </div>
@@ -451,11 +685,14 @@ export function ReviewCentrePage() {
                 </div>
                 <input
                   type="date"
+                  disabled={!canEditFields}
                   value={draft.invoiceDate}
                   onFocus={() => setFocusedField('invoiceDate')}
                   onBlur={() => setFocusedField(null)}
-                  onChange={(e) => updateTextField('invoiceDate', e.target.value)}
-                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+                  onChange={(e) =>
+                    updateTextField('invoiceDate', e.target.value)
+                  }
+                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:bg-slate-50"
                 />
                 {renderEvidenceLine('invoiceDate')}
               </div>
@@ -466,22 +703,18 @@ export function ReviewCentrePage() {
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
               <div>
                 <h2 className="text-sm font-semibold text-slate-900">
-                  Tax &amp; Amount Verification (INR)
+                  Tax &amp; Amount Reconciliation (INR)
                 </h2>
                 <p className="text-xs text-slate-500">
-                  Live reconciliation check: Taxable + CGST + SGST + IGST
+                  Server &amp; live check: Taxable + CGST + SGST + IGST
                 </p>
               </div>
-              {!settings.autoFlagTaxMismatch && check.isBalanced ? (
+              {!settings.autoFlagTaxMismatch && !hasServerVariance ? (
                 <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700">
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
                   Totals Reconciled
                 </span>
-              ) : !settings.autoFlagTaxMismatch ? (
-                <span className="text-xs font-medium text-slate-500">
-                  Mismatch highlight disabled in Settings (verification still gated)
-                </span>
-              ) : check.isBalanced ? (
+              ) : !hasServerVariance ? (
                 <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700">
                   <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
                   Totals Reconciled
@@ -494,6 +727,18 @@ export function ReviewCentrePage() {
               )}
             </div>
 
+            {draft.reconciliationDiscrepancies &&
+              draft.reconciliationDiscrepancies.length > 0 && (
+                <div className="space-y-1.5 rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-950">
+                  {draft.reconciliationDiscrepancies.map((d) => (
+                    <p key={d.code}>
+                      <strong className="font-mono">{d.code}:</strong>{' '}
+                      {d.message}
+                    </p>
+                  ))}
+                </div>
+              )}
+
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <div className="flex items-center justify-between gap-2">
@@ -505,62 +750,74 @@ export function ReviewCentrePage() {
                 <input
                   type="number"
                   step="0.01"
+                  disabled={!canEditFields}
                   value={draft.taxableAmount}
                   onFocus={() => setFocusedField('taxableAmount')}
                   onBlur={() => setFocusedField(null)}
-                  onChange={(e) => updateNumericField('taxableAmount', e.target.value)}
-                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs tabular-nums text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+                  onChange={(e) =>
+                    updateNumericField('taxableAmount', e.target.value)
+                  }
+                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs tabular-nums text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:bg-slate-50"
                 />
                 {renderEvidenceLine('taxableAmount')}
               </div>
 
               <div>
                 <div className="flex items-center justify-between gap-2">
-                  <label className="text-xs font-medium text-slate-700">CGST (₹)</label>
+                  <label className="text-xs font-medium text-slate-700">
+                    CGST (₹)
+                  </label>
                   {renderFieldStatusControl('cgst')}
                 </div>
                 <input
                   type="number"
                   step="0.01"
+                  disabled={!canEditFields}
                   value={draft.cgst}
                   onFocus={() => setFocusedField('cgst')}
                   onBlur={() => setFocusedField(null)}
                   onChange={(e) => updateNumericField('cgst', e.target.value)}
-                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs tabular-nums text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs tabular-nums text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:bg-slate-50"
                 />
                 {renderEvidenceLine('cgst')}
               </div>
 
               <div>
                 <div className="flex items-center justify-between gap-2">
-                  <label className="text-xs font-medium text-slate-700">SGST (₹)</label>
+                  <label className="text-xs font-medium text-slate-700">
+                    SGST (₹)
+                  </label>
                   {renderFieldStatusControl('sgst')}
                 </div>
                 <input
                   type="number"
                   step="0.01"
+                  disabled={!canEditFields}
                   value={draft.sgst}
                   onFocus={() => setFocusedField('sgst')}
                   onBlur={() => setFocusedField(null)}
                   onChange={(e) => updateNumericField('sgst', e.target.value)}
-                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs tabular-nums text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs tabular-nums text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:bg-slate-50"
                 />
                 {renderEvidenceLine('sgst')}
               </div>
 
               <div>
                 <div className="flex items-center justify-between gap-2">
-                  <label className="text-xs font-medium text-slate-700">IGST (₹)</label>
+                  <label className="text-xs font-medium text-slate-700">
+                    IGST (₹)
+                  </label>
                   {renderFieldStatusControl('igst')}
                 </div>
                 <input
                   type="number"
                   step="0.01"
+                  disabled={!canEditFields}
                   value={draft.igst}
                   onFocus={() => setFocusedField('igst')}
                   onBlur={() => setFocusedField(null)}
                   onChange={(e) => updateNumericField('igst', e.target.value)}
-                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs tabular-nums text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+                  className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 px-3 font-mono text-xs tabular-nums text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:bg-slate-50"
                 />
                 {renderEvidenceLine('igst')}
               </div>
@@ -575,11 +832,14 @@ export function ReviewCentrePage() {
                 <input
                   type="number"
                   step="0.01"
+                  disabled={!canEditFields}
                   value={draft.totalAmount}
                   onFocus={() => setFocusedField('totalAmount')}
                   onBlur={() => setFocusedField(null)}
-                  onChange={(e) => updateNumericField('totalAmount', e.target.value)}
-                  className={`mt-1.5 h-10 w-full rounded-lg border px-3 font-mono text-sm font-semibold tabular-nums focus:outline-none focus:ring-2 ${
+                  onChange={(e) =>
+                    updateNumericField('totalAmount', e.target.value)
+                  }
+                  className={`mt-1.5 h-10 w-full rounded-lg border px-3 font-mono text-sm font-semibold tabular-nums focus:outline-none focus:ring-2 disabled:bg-slate-50 ${
                     !settings.autoFlagTaxMismatch || check.isBalanced
                       ? 'border-slate-200 text-slate-900 focus:border-indigo-500 focus:ring-indigo-500/15'
                       : 'border-rose-300 bg-rose-50/40 text-rose-900 focus:border-rose-500 focus:ring-rose-500/15'
@@ -602,6 +862,7 @@ export function ReviewCentrePage() {
               </label>
               <textarea
                 rows={2}
+                disabled={!canEditFields}
                 value={draft.reviewerNote}
                 onChange={(e) =>
                   setDraft((prev) =>
@@ -609,13 +870,89 @@ export function ReviewCentrePage() {
                   )
                 }
                 placeholder="Add accounting or GST verification notes..."
-                className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15"
+                className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/15 disabled:bg-slate-50"
               />
             </div>
 
-            {draft.status === 'Flagged' && draft.flagReason && (
-              <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-900">
-                <strong>Flag Reason:</strong> {draft.flagReason}
+            {openFlags.length > 0 && (
+              <div className="space-y-2 border-t border-slate-100 pt-3">
+                <p className="text-xs font-semibold text-rose-800">
+                  Open Review Flags ({openFlags.length})
+                </p>
+                {openFlags.map((flag) => (
+                  <div
+                    key={flag.id}
+                    className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-950"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="font-mono text-[11px] font-semibold text-rose-700">
+                        {flag.flagCategory}
+                      </p>
+                      <p className="mt-0.5">{flag.reasonText}</p>
+                      <p className="mt-1 text-[11px] text-rose-700/80">
+                        Raised {formatDateIN(flag.createdAt.slice(0, 10))}
+                        {flag.createdByName ? ` by ${flag.createdByName}` : ''}
+                      </p>
+                    </div>
+                    {isReviewerOrAdmin && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActionError(null);
+                          setResolvingFlag(flag);
+                          setResolveStatus('RESOLVED');
+                          setResolveNote('');
+                          setResolveReopenToPending(true);
+                        }}
+                        className="shrink-0 rounded-md border border-rose-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-rose-800 hover:bg-rose-100"
+                      >
+                        Resolve / Dismiss
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
+            <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+              <History className="h-4 w-4 text-slate-500" />
+              <h2 className="text-sm font-semibold text-slate-900">
+                Immutable Review History
+              </h2>
+            </div>
+            {!selectedReviewHistory ||
+            selectedReviewHistory.actions.length === 0 ? (
+              <p className="py-4 text-xs text-slate-500">
+                No formal review actions logged for this invoice yet.
+              </p>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {selectedReviewHistory.actions.map((act) => (
+                  <div key={act.id} className="py-3 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-semibold text-slate-900">
+                        {act.actorDisplayName} ·{' '}
+                        <span className="font-mono text-[11px] text-indigo-700">
+                          {act.actionType}
+                        </span>
+                      </span>
+                      <span className="font-mono text-[11px] text-slate-400">
+                        {new Date(act.createdAt).toLocaleString('en-IN')}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-slate-500">
+                      {act.previousStatus} &rarr; {act.newStatus}
+                      {act.varianceAcknowledged
+                        ? ' · Variance acknowledged by human reviewer'
+                        : ''}
+                    </p>
+                    {act.comment && (
+                      <p className="mt-1 text-slate-700">{act.comment}</p>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -626,40 +963,269 @@ export function ReviewCentrePage() {
         open={flagModalOpen}
         invoiceNumber={draft.invoiceNumber}
         initialReason={draft.flagReason}
-        hasArithmeticMismatch={!check.isBalanced}
+        hasArithmeticMismatch={hasServerVariance}
         hasDuplicateWarning={Boolean(activeDuplicateWarning)}
-        onConfirm={handleConfirmFlag}
+        submitting={mutationInFlight}
+        apiError={actionError}
+        onConfirm={(cat, reason) => void handleConfirmFlag(cat, reason)}
         onClose={() => setFlagModalOpen(false)}
       />
 
-      <ConfirmDialog
-        open={verifyMismatchOpen}
-        tone="warning"
-        title="Arithmetic Mismatch — Confirm Verification"
-        description={
-          <div className="space-y-2">
-            <p>
-              This invoice cannot be verified silently because the stated total does
-              not match Taxable + GST:
+      {verifyDialogOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="verify-dialog-title"
+        >
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl">
+            <h3
+              id="verify-dialog-title"
+              className="text-sm font-semibold text-slate-900"
+            >
+              Confirm Human Invoice Verification
+            </h3>
+            <p className="mt-1 text-xs text-slate-600">
+              Verifying{' '}
+              <span className="font-mono font-semibold">
+                {draft.invoiceNumber}
+              </span>{' '}
+              records an immutable reviewer sign-off and locks financial fields.
             </p>
-            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 font-mono text-[11px] text-amber-950 tabular-nums">
-              <p>Computed Sum: {formatINR(check.expectedTotal)}</p>
-              <p>Stated Total: {formatINR(draft.totalAmount)}</p>
-              <p className="font-semibold text-rose-700">
-                Variance: {formatINR(check.difference)}
-              </p>
+
+            {hasServerVariance && (
+              <div className="mt-3 space-y-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-950">
+                <p className="font-semibold text-rose-700">
+                  Arithmetic / Reconciliation Variance Detected:{' '}
+                  {formatINR(check.difference)}
+                </p>
+                <label className="flex cursor-pointer items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={verifyAckVariance}
+                    onChange={(e) => setVerifyAckVariance(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-emerald-600"
+                  />
+                  <span>
+                    I explicitly acknowledge this variance and confirm the
+                    stated amounts should be verified as entered.
+                  </span>
+                </label>
+              </div>
+            )}
+
+            {openFlags.length > 0 && (
+              <div className="mt-3 space-y-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-950">
+                <label className="flex cursor-pointer items-start gap-2 font-medium">
+                  <input
+                    type="checkbox"
+                    checked={verifyResolveOpenFlags}
+                    onChange={(e) =>
+                      setVerifyResolveOpenFlags(e.target.checked)
+                    }
+                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-emerald-600"
+                  />
+                  <span>
+                    Resolve {openFlags.length} open review flag(s) upon
+                    verification
+                  </span>
+                </label>
+                {verifyResolveOpenFlags && (
+                  <input
+                    type="text"
+                    value={verifyFlagNote}
+                    onChange={(e) => setVerifyFlagNote(e.target.value)}
+                    placeholder="Flag resolution note (required)"
+                    className="h-9 w-full rounded-lg border border-rose-200 bg-white px-2.5 text-xs"
+                  />
+                )}
+              </div>
+            )}
+
+            <div className="mt-3">
+              <label className="block text-xs font-medium text-slate-700">
+                Verification Confirmation Note (Optional)
+              </label>
+              <textarea
+                rows={2}
+                value={verifyNote}
+                onChange={(e) => setVerifyNote(e.target.value)}
+                placeholder="Optional reviewer sign-off comment..."
+                className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-xs"
+              />
             </div>
-            <p>
-              Confirming will mark the invoice as Verified without altering any
-              financial values.
-            </p>
+
+            {actionError && (
+              <p className="mt-2 text-xs font-medium text-rose-600" role="alert">
+                {actionError}
+              </p>
+            )}
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={mutationInFlight}
+                onClick={() => setVerifyDialogOpen(false)}
+                className="h-9 rounded-lg border border-slate-200 px-4 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={mutationInFlight}
+                onClick={() => void handleVerifySubmit()}
+                className="h-9 rounded-lg bg-emerald-600 px-4 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+              >
+                {mutationInFlight ? 'Verifying...' : 'Confirm Verification'}
+              </button>
+            </div>
           </div>
-        }
-        cancelLabel="Return to Editing"
-        confirmLabel="Verify Despite Mismatch"
-        onConfirm={() => executeVerify(true)}
-        onCancel={() => setVerifyMismatchOpen(false)}
-      />
+        </div>
+      )}
+
+      {resolvingFlag && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="resolve-flag-title"
+        >
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl text-xs">
+            <h3
+              id="resolve-flag-title"
+              className="text-sm font-semibold text-slate-900"
+            >
+              Resolve Review Flag
+            </h3>
+            <p className="mt-1 text-slate-600">{resolvingFlag.reasonText}</p>
+
+            <div className="mt-3 space-y-3">
+              <div>
+                <label className="block font-medium text-slate-700">
+                  Resolution Outcome
+                </label>
+                <select
+                  value={resolveStatus}
+                  onChange={(e) =>
+                    setResolveStatus(
+                      e.target.value as 'RESOLVED' | 'DISMISSED'
+                    )
+                  }
+                  className="mt-1 h-9 w-full rounded-lg border border-slate-200 px-2.5"
+                >
+                  <option value="RESOLVED">Resolved</option>
+                  <option value="DISMISSED">Dismissed</option>
+                </select>
+              </div>
+              <div>
+                <label className="block font-medium text-slate-700">
+                  Resolution Note *
+                </label>
+                <textarea
+                  rows={2}
+                  value={resolveNote}
+                  onChange={(e) => setResolveNote(e.target.value)}
+                  placeholder="Explain how this flag was resolved..."
+                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2"
+                />
+              </div>
+              <label className="flex cursor-pointer items-center gap-2 text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={resolveReopenToPending}
+                  onChange={(e) =>
+                    setResolveReopenToPending(e.target.checked)
+                  }
+                  className="h-4 w-4 rounded border-slate-300 text-indigo-600"
+                />
+                <span>
+                  Return invoice to Pending Review when no open flags remain
+                </span>
+              </label>
+            </div>
+
+            {actionError && (
+              <p className="mt-2 font-medium text-rose-600" role="alert">
+                {actionError}
+              </p>
+            )}
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={mutationInFlight}
+                onClick={() => setResolvingFlag(null)}
+                className="h-9 rounded-lg border border-slate-200 px-4 font-semibold text-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={mutationInFlight}
+                onClick={() => void handleResolveFlagSubmit()}
+                className="h-9 rounded-lg bg-indigo-600 px-4 font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
+              >
+                {mutationInFlight ? 'Saving...' : 'Submit Resolution'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {reopenDialogOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reopen-dialog-title"
+        >
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl text-xs">
+            <h3
+              id="reopen-dialog-title"
+              className="text-sm font-semibold text-slate-900"
+            >
+              Reopen Invoice to Pending Review
+            </h3>
+            <p className="mt-1 text-slate-600">
+              Provide an audit reason to return{' '}
+              <span className="font-mono font-semibold">
+                {draft.invoiceNumber}
+              </span>{' '}
+              back to Pending Review.
+            </p>
+            <textarea
+              rows={3}
+              value={reopenReason}
+              onChange={(e) => setReopenReason(e.target.value)}
+              placeholder="Audit reason for reopening..."
+              className="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2"
+            />
+            {actionError && (
+              <p className="mt-2 font-medium text-rose-600" role="alert">
+                {actionError}
+              </p>
+            )}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={mutationInFlight}
+                onClick={() => setReopenDialogOpen(false)}
+                className="h-9 rounded-lg border border-slate-200 px-4 font-semibold text-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={mutationInFlight}
+                onClick={() => void handleReopenSubmit()}
+                className="h-9 rounded-lg bg-amber-600 px-4 font-semibold text-white hover:bg-amber-700 disabled:opacity-60"
+              >
+                {mutationInFlight ? 'Reopening...' : 'Confirm Reopen'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ConfirmDialog
         open={pendingNavigation !== null}
@@ -671,7 +1237,8 @@ export function ReviewCentrePage() {
             <span className="font-mono font-semibold text-slate-900">
               {draft.invoiceNumber}
             </span>
-            . Choose whether to save your edits, discard them, or continue editing.
+            . Choose whether to save your edits, discard them, or continue
+            editing.
           </p>
         }
         cancelLabel="Continue Editing"
@@ -683,28 +1250,30 @@ export function ReviewCentrePage() {
           commitPendingNavigation();
         }}
         onConfirm={() => {
-          updateInvoice(draft, 'Saved manual edits in Review Centre');
-          commitPendingNavigation();
+          if (currentInvoice) {
+            void saveInvoiceChanges(currentInvoice, draft).then(() => {
+              commitPendingNavigation();
+            });
+          }
         }}
       />
 
       <ConfirmDialog
         open={deleteDialogOpen}
         tone="danger"
-        title="Delete Locally Staged Demo Invoice?"
+        title="Soft-Delete Invoice?"
         description={
           <p>
-            This will remove{' '}
+            Soft-delete{' '}
             <span className="font-mono font-semibold text-slate-900">
               {draft.invoiceNumber}
             </span>{' '}
-            from your local browser demo workspace and revoke its temporary file
-            preview URL. No server-side document is deleted.
+            from the active workspace ledger? Audit logs remain preserved.
           </p>
         }
         cancelLabel="Keep Invoice"
-        confirmLabel="Delete Local Draft"
-        onConfirm={handleConfirmDeleteLocal}
+        confirmLabel="Soft-Delete Invoice"
+        onConfirm={() => void handleConfirmDelete()}
         onCancel={() => setDeleteDialogOpen(false)}
       />
     </div>

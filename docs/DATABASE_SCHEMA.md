@@ -2,7 +2,7 @@
 
 **Database Engine:** PostgreSQL 16+  
 **ORM / Migration Tool:** SQLAlchemy 2.0 + Alembic  
-**Milestone:** Task 002.5 Implemented on Unified 17-Table Schema *(All 17 tables active in SQLAlchemy models & Alembic migrations `0001`–`0003`; Auth, Tenancy/RBAC, Suppliers, Documents, and Invoices/GST Reconciliation implemented; Human Review & Reports endpoints pending Task 002.6–002.7)*
+**Milestone:** Task 002.7 Verified on Unified 17-Table Schema *(All 17 tables active in SQLAlchemy models & Alembic migrations `0001`–`0003`; Auth, Tenancy/RBAC, Suppliers, Documents, Invoices/GST Reconciliation, Human Review, Reports/CSV Export, and Frontend API integration implemented; no new schema migrations required in Tasks 002.6–002.7)*
 
 ---
 
@@ -13,7 +13,7 @@
 - **Monetary Precision:** `NUMERIC(14, 2)` across all currency amounts; `NUMERIC(5, 2)` for tax percentages; `NUMERIC(14, 4)` for line-item quantities and unit prices. Floating-point types (`REAL`, `DOUBLE PRECISION`) are prohibited for financial columns.
 - **Timestamps:** `TIMESTAMPTZ` stored in UTC (`DEFAULT now()`). Invoice issue/due dates use `DATE` (`YYYY-MM-DD`).
 - **Tenant Scoping:** Every workspace-owned table (`suppliers`, `documents`, `invoices`, `invoice_line_items`, `invoice_review_flags`, `review_actions`, `audit_events`) carries an explicit `workspace_id UUID NOT NULL` with composite foreign keys or indexed constraints so tenant filters never rely solely on multi-hop joins.
-- **Immutability:** `review_actions` and `audit_events` are append-only; the application database role holds `SELECT` and `INSERT` only (no `UPDATE` or `DELETE` grants). Soft-deletion on `invoices` never deletes related flags, review actions, or audit records.
+- **Immutability:** `review_actions` and `audit_events` are application-enforced append-only tables (no update or delete HTTP endpoints or service mutations exist, and write methods on `/audit-events` and `/review-history` return `405 Method Not Allowed`). Restricting the runtime PostgreSQL application role to `SELECT` and `INSERT` grants on `review_actions` and `audit_events` (no `UPDATE` or `DELETE` grants) is a **deployment/DBA hardening expectation** rather than enforced by Alembic migrations `0001`–`0003`. Soft-deletion on `invoices` never deletes related flags, review actions, or audit records.
 
 ---
 

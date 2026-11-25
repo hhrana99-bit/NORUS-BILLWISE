@@ -1,8 +1,8 @@
-import { Bell, Check, Menu, Search, X } from 'lucide-react';
+import { Bell, Check, LogOut, Menu, Search, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { formatINR } from '../../services/formatters';
 import { useWorkspace } from '../../state/WorkspaceContext';
-import type { AppRoute } from '../../types/domain';
+import type { AppRoute, WorkspaceRole } from '../../types/domain';
 
 const ROUTE_TITLES: Record<AppRoute, string> = {
   dashboard: 'Dashboard',
@@ -13,9 +13,30 @@ const ROUTE_TITLES: Record<AppRoute, string> = {
   settings: 'Settings',
 };
 
+const ROLE_LABELS: Record<WorkspaceRole, string> = {
+  WORKSPACE_ADMIN: 'Workspace Admin',
+  REVIEWER: 'Reviewer',
+  UPLOADER: 'Uploader',
+  VIEWER: 'Viewer',
+};
+
+function getInitials(fullName: string): string {
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 'NB';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+}
+
 export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
   const {
     activeRoute,
+    currentUser,
+    workspaces,
+    activeWorkspaceId,
+    activeWorkspace,
+    activeWorkspaceRole,
+    switchWorkspace,
+    logout,
     settings,
     invoices,
     suppliers,
@@ -42,7 +63,10 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
       if (searchRef.current && !searchRef.current.contains(target)) {
         setSearchFocused(false);
       }
-      if (mobileSearchRef.current && !mobileSearchRef.current.contains(target)) {
+      if (
+        mobileSearchRef.current &&
+        !mobileSearchRef.current.contains(target)
+      ) {
         setMobileSearchOpen(false);
       }
       if (notifRef.current && !notifRef.current.contains(target)) {
@@ -91,16 +115,28 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
   const matchedSuppliers = trimmed
     ? suppliers
         .filter((sup) =>
-          `${sup.name} ${sup.gstin} ${sup.category}`.toLowerCase().includes(trimmed)
+          `${sup.name} ${sup.gstin} ${sup.category}`
+            .toLowerCase()
+            .includes(trimmed)
         )
         .slice(0, 3)
     : [];
 
+  const workspaceLabel = activeWorkspace?.name ?? settings.workspaceName;
+  const userName = currentUser?.fullName ?? 'Authenticated User';
+  const roleLabel = activeWorkspaceRole
+    ? ROLE_LABELS[activeWorkspaceRole]
+    : 'Member';
+
   const renderSearchResults = (dropdownClassName: string) => (
-    <div className={dropdownClassName} role="region" aria-label="Search results">
+    <div
+      className={dropdownClassName}
+      role="region"
+      aria-label="Search results"
+    >
       {matchedInvoices.length === 0 && matchedSuppliers.length === 0 ? (
         <p className="px-3 py-4 text-center text-xs text-slate-500">
-          No matching sample invoices or suppliers for &ldquo;{globalQuery}&rdquo;.
+          No matching invoices or suppliers for &ldquo;{globalQuery}&rdquo;.
         </p>
       ) : (
         <div className="space-y-2">
@@ -125,7 +161,9 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
                     <p className="font-mono font-semibold text-slate-900">
                       {inv.invoiceNumber}
                     </p>
-                    <p className="truncate text-slate-500">{inv.supplierName}</p>
+                    <p className="truncate text-slate-500">
+                      {inv.supplierName}
+                    </p>
                   </div>
                   <span className="ml-3 shrink-0 font-mono font-medium text-slate-700 tabular-nums">
                     {formatINR(inv.totalAmount)}
@@ -153,8 +191,12 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
                   className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs hover:bg-slate-50"
                 >
                   <div className="min-w-0">
-                    <p className="truncate font-medium text-slate-900">{sup.name}</p>
-                    <p className="font-mono text-[11px] text-slate-500">{sup.gstin}</p>
+                    <p className="truncate font-medium text-slate-900">
+                      {sup.name}
+                    </p>
+                    <p className="font-mono text-[11px] text-slate-500">
+                      {sup.gstin || 'No GSTIN'}
+                    </p>
                   </div>
                   <span className="ml-2 shrink-0 text-[11px] font-medium text-indigo-600">
                     View bills
@@ -185,12 +227,30 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
             <h1 className="truncate font-semibold text-slate-900">
               {ROUTE_TITLES[activeRoute]}
             </h1>
-            <span className="hidden text-slate-300 sm:inline" aria-hidden="true">
+            <span
+              className="hidden text-slate-300 sm:inline"
+              aria-hidden="true"
+            >
               /
             </span>
-            <span className="hidden max-w-[220px] truncate text-xs font-medium text-slate-500 sm:inline">
-              {settings.workspaceName}
-            </span>
+            {workspaces.length > 1 ? (
+              <select
+                aria-label="Active workspace"
+                value={activeWorkspaceId ?? ''}
+                onChange={(e) => switchWorkspace(e.target.value)}
+                className="hidden h-8 max-w-[220px] rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-medium text-slate-700 focus:border-indigo-500 focus:bg-white focus:outline-none sm:inline-block"
+              >
+                {workspaces.map((ws) => (
+                  <option key={ws.workspaceId} value={ws.workspaceId}>
+                    {ws.name} ({ws.workspaceCode})
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="hidden max-w-[220px] truncate text-xs font-medium text-slate-500 sm:inline">
+                {workspaceLabel}
+              </span>
+            )}
           </div>
         </div>
 
@@ -202,7 +262,11 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
               setNotifOpen(false);
               setMobileSearchOpen((open) => !open);
             }}
-            aria-label={mobileSearchOpen ? 'Close workspace search' : 'Open workspace search'}
+            aria-label={
+              mobileSearchOpen
+                ? 'Close workspace search'
+                : 'Open workspace search'
+            }
             aria-expanded={mobileSearchOpen}
             className="flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 md:hidden"
           >
@@ -213,7 +277,7 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
             )}
           </button>
 
-          <div ref={searchRef} className="relative hidden w-64 md:block lg:w-80">
+          <div ref={searchRef} className="relative hidden w-60 md:block lg:w-72">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
@@ -258,7 +322,7 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
               <div className="absolute right-0 top-full mt-2 w-[min(22rem,calc(100vw-1.5rem))] rounded-xl border border-slate-200 bg-white shadow-lg sm:w-96">
                 <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
                   <span className="text-xs font-semibold text-slate-900">
-                    Review Notifications ({unreadCount} unread)
+                    Review Alerts ({unreadCount} unread)
                   </span>
                   {unreadCount > 0 && (
                     <button
@@ -274,7 +338,7 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
                 <div className="max-h-80 divide-y divide-slate-100 overflow-y-auto">
                   {notifications.length === 0 ? (
                     <p className="px-4 py-6 text-center text-xs text-slate-500">
-                      No active notifications for your current settings.
+                      No active alerts for your current workspace settings.
                     </p>
                   ) : (
                     notifications.map((item) => (
@@ -300,7 +364,9 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
                             {item.timeLabel}
                           </span>
                         </div>
-                        <p className="mt-1 text-xs text-slate-600">{item.detail}</p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          {item.detail}
+                        </p>
                       </button>
                     ))
                   )}
@@ -309,18 +375,27 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
             )}
           </div>
 
-          <div className="flex items-center gap-2.5 border-l border-slate-200 pl-2 sm:pl-3">
+          <div className="flex items-center gap-2 border-l border-slate-200 pl-2 sm:pl-3">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-xs font-semibold text-white">
-              AD
+              {getInitials(userName)}
             </div>
             <div className="hidden text-left sm:block">
-              <p className="text-xs font-semibold leading-tight text-slate-900 whitespace-nowrap">
-                CA Ananya Deshmukh
+              <p className="max-w-[140px] truncate text-xs font-semibold leading-tight text-slate-900">
+                {userName}
               </p>
               <p className="text-[11px] leading-tight text-slate-500 whitespace-nowrap">
-                Partner · Reviewer
+                {roleLabel}
               </p>
             </div>
+            <button
+              type="button"
+              onClick={() => void logout()}
+              title="Sign out"
+              aria-label="Sign out"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-900"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
           </div>
         </div>
       </div>
@@ -330,6 +405,22 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
           ref={mobileSearchRef}
           className="border-t border-slate-100 bg-white px-4 py-3 md:hidden"
         >
+          {workspaces.length > 1 && (
+            <div className="mb-2.5">
+              <select
+                aria-label="Switch workspace"
+                value={activeWorkspaceId ?? ''}
+                onChange={(e) => switchWorkspace(e.target.value)}
+                className="h-9 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs font-medium text-slate-800"
+              >
+                {workspaces.map((ws) => (
+                  <option key={ws.workspaceId} value={ws.workspaceId}>
+                    {ws.name} ({ws.workspaceCode})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <div className="relative flex-1">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />

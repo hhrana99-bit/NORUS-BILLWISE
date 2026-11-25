@@ -1,38 +1,210 @@
-import { BarChart3, Check, Download, FileSpreadsheet } from 'lucide-react';
-import { useState } from 'react';
-import { Card, CardHeader } from '../components/common/Card';
-import { formatINR, formatINRCompact } from '../services/formatters';
 import {
-  buildMonthlyTrendStats,
-  computeReportMetrics,
-  exportInvoicesToCsv,
-  type TrendWindowOption,
-} from '../services/reportService';
+  AlertCircle,
+  BarChart3,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  FileSpreadsheet,
+  History,
+  Info,
+  Search,
+} from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Card, CardHeader } from '../components/common/Card';
+import { apiClient, formatApiErrorMessage } from '../services/apiClient';
+import { formatDateIN, formatINR, formatINRCompact } from '../services/formatters';
 import { useWorkspace } from '../state/WorkspaceContext';
+import type {
+  ApiAuditEvent,
+  ApiReportExceptionItem,
+  FlagCategory,
+} from '../types/domain';
+
+function toNumber(val: string | number | undefined | null): number {
+  if (val === null || val === undefined || val === '') return 0;
+  const parsed = Number(val);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
 
 export function ReportsPage() {
-  const { invoices, settings, selectInvoiceForReview } = useWorkspace();
+  const {
+    activeWorkspaceId,
+    activeWorkspaceRole,
+    reportSummary,
+    monthlyTrend,
+    monthlyTrendMeta,
+    reportsError,
+    loadTrendWindow,
+    exportCsvReport,
+    selectInvoiceForReview,
+  } = useWorkspace();
+
+  const [trendWindow, setTrendWindow] = useState<'6m' | '12m' | 'all'>(
+    monthlyTrendMeta.window
+  );
+  const [trendLoading, setTrendLoading] = useState(false);
+
+  const [exSearch, setExSearch] = useState('');
+  const [exStatus, setExStatus] = useState<'' | 'PENDING_REVIEW' | 'FLAGGED'>('');
+  const [exCategory, setExCategory] = useState<'' | FlagCategory>('');
+  const [exPage, setExPage] = useState(1);
+  const [exceptions, setExceptions] = useState<ApiReportExceptionItem[]>([]);
+  const [exceptionsTotal, setExceptionsTotal] = useState(0);
+  const [exceptionsLoading, setExceptionsLoading] = useState(false);
+  const [exceptionsError, setExceptionsError] = useState<string | null>(null);
+
+  const [auditEventType, setAuditEventType] = useState('');
+  const [auditPage, setAuditPage] = useState(1);
+  const [auditRows, setAuditRows] = useState<ApiAuditEvent[]>([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
+
+  const [exporting, setExporting] = useState(false);
   const [exportedMessage, setExportedMessage] = useState(false);
-  const [trendWindow, setTrendWindow] = useState<TrendWindowOption>(6);
+  const [exportError, setExportError] = useState<string | null>(null);
 
-  const metrics = computeReportMetrics(invoices);
-  const monthlyTrends = buildMonthlyTrendStats(invoices, {
-    windowMonths: trendWindow,
-  });
-  const flaggedList = invoices.filter((inv) => inv.status === 'Flagged');
+  const canExportCsv =
+    activeWorkspaceRole === 'WORKSPACE_ADMIN' ||
+    activeWorkspaceRole === 'REVIEWER' ||
+    activeWorkspaceRole === 'VIEWER';
 
-  const maxMonthlyCount = Math.max(1, ...monthlyTrends.map((m) => m.totalCount));
-  const chartCountTotal = monthlyTrends.reduce((sum, m) => sum + m.totalCount, 0);
-  const rangeSubtitle =
-    monthlyTrends.length > 0
-      ? `${monthlyTrends[0].label} – ${monthlyTrends[monthlyTrends.length - 1].label} · ${chartCountTotal} of ${metrics.totalInvoices} invoices`
-      : 'No valid invoice dates available';
+  const fetchExceptions = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!activeWorkspaceId) return;
+      setExceptionsLoading(true);
+      setExceptionsError(null);
+      try {
+        const res = await apiClient.listReportExceptions(
+          activeWorkspaceId,
+          {
+            search: exSearch.trim() || undefined,
+            status: exStatus || undefined,
+            flagCategory: exCategory || undefined,
+            page: exPage,
+            pageSize: 10,
+          },
+          signal
+        );
+        if (signal?.aborted) return;
+        setExceptions(res.items);
+        setExceptionsTotal(res.total);
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setExceptionsError(formatApiErrorMessage(err));
+      } finally {
+        if (!signal?.aborted) setExceptionsLoading(false);
+      }
+    },
+    [activeWorkspaceId, exCategory, exPage, exSearch, exStatus]
+  );
 
-  const handleExportCsv = () => {
-    exportInvoicesToCsv(invoices, settings.workspaceName);
-    setExportedMessage(true);
-    setTimeout(() => setExportedMessage(false), 3000);
+  const fetchAuditTrail = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!activeWorkspaceId) return;
+      setAuditLoading(true);
+      setAuditError(null);
+      try {
+        const res = await apiClient.listAuditEvents(
+          activeWorkspaceId,
+          {
+            eventType: auditEventType.trim() || undefined,
+            page: auditPage,
+            pageSize: 15,
+          },
+          signal
+        );
+        if (signal?.aborted) return;
+        setAuditRows(res.items);
+        setAuditTotal(res.total);
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setAuditError(formatApiErrorMessage(err));
+      } finally {
+        if (!signal?.aborted) setAuditLoading(false);
+      }
+    },
+    [activeWorkspaceId, auditEventType, auditPage]
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void fetchExceptions(controller.signal);
+    }, 150);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [fetchExceptions]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void fetchAuditTrail(controller.signal);
+    }, 150);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [fetchAuditTrail]);
+
+  const handleWindowChange = async (win: '6m' | '12m' | 'all') => {
+    setTrendWindow(win);
+    setTrendLoading(true);
+    try {
+      await loadTrendWindow(win);
+    } finally {
+      setTrendLoading(false);
+    }
   };
+
+  const handleExportCsv = async () => {
+    if (!canExportCsv) return;
+    setExportError(null);
+    setExporting(true);
+    try {
+      await exportCsvReport();
+      setExportedMessage(true);
+      setTimeout(() => setExportedMessage(false), 3000);
+      void fetchAuditTrail();
+    } catch (err) {
+      setExportError(formatApiErrorMessage(err));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const metrics = {
+    totalInvoices: reportSummary?.totalInvoices ?? 0,
+    pendingCount: reportSummary?.pendingCount ?? 0,
+    verifiedCount: reportSummary?.verifiedCount ?? 0,
+    flaggedCount: reportSummary?.flaggedCount ?? 0,
+    verificationRatePercent: reportSummary?.verificationRatePercent ?? 0,
+    pendingValue: toNumber(reportSummary?.pendingValue),
+    verifiedValue: toNumber(reportSummary?.verifiedValue),
+    flaggedValue: toNumber(reportSummary?.flaggedValue),
+    totalGst: toNumber(reportSummary?.totalGst),
+    totalInvoiceValue: toNumber(reportSummary?.totalInvoiceValue),
+    openFlagCount: reportSummary?.openFlagCount ?? 0,
+  };
+
+  const maxMonthlyCount = Math.max(
+    1,
+    ...monthlyTrend.map((m) => m.totalCount)
+  );
+  const chartCountTotal = monthlyTrend.reduce(
+    (sum, m) => sum + m.totalCount,
+    0
+  );
+  const rangeSubtitle =
+    monthlyTrend.length > 0
+      ? `${monthlyTrend[0].label} – ${monthlyTrend[monthlyTrend.length - 1].label} · ${chartCountTotal} of ${metrics.totalInvoices} invoices`
+      : 'No dated invoices available';
+
+  const exTotalPages = Math.max(1, Math.ceil(exceptionsTotal / 10));
+  const auditTotalPages = Math.max(1, Math.ceil(auditTotal / 15));
 
   return (
     <div className="space-y-6">
@@ -42,15 +214,22 @@ export function ReportsPage() {
             Verification &amp; GST Summary Reports
           </h2>
           <p className="text-xs text-slate-500">
-            Live accounting summary across your local prototype invoice register.
+            Server-aggregated operational accounting metrics, exception feed,
+            formula-safe CSV export, and audit trail.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={handleExportCsv}
-            className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-4 text-xs font-semibold text-white hover:bg-slate-800 whitespace-nowrap"
+            disabled={!canExportCsv || exporting}
+            onClick={() => void handleExportCsv()}
+            title={
+              canExportCsv
+                ? 'Download formula-safe UTF-8 CSV from server'
+                : 'CSV export requires VIEWER, REVIEWER, or WORKSPACE_ADMIN role'
+            }
+            className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-4 text-xs font-semibold text-white hover:bg-slate-800 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
           >
             {exportedMessage ? (
               <>
@@ -60,14 +239,14 @@ export function ReportsPage() {
             ) : (
               <>
                 <Download className="h-4 w-4" />
-                Export CSV Report
+                {exporting ? 'Exporting CSV...' : 'Export CSV Report'}
               </>
             )}
           </button>
           <button
             type="button"
             disabled
-            title="Excel (.xlsx) export will be added with backend integration"
+            title="Excel (.xlsx) export is planned in a future release"
             className="inline-flex h-10 cursor-not-allowed items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 text-xs font-medium text-slate-400 whitespace-nowrap"
           >
             <FileSpreadsheet className="h-4 w-4" />
@@ -76,9 +255,30 @@ export function ReportsPage() {
         </div>
       </div>
 
+      <div className="flex items-start gap-2.5 rounded-xl border border-indigo-200 bg-indigo-50/70 px-4 py-3 text-xs text-indigo-950">
+        <Info className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
+        <p>
+          <strong>Operational Verification Summary:</strong>{' '}
+          {reportSummary?.disclaimer ??
+            'Operational verification and GST input-credit summary only; not a statutory GST return or official GSTR filing.'}
+        </p>
+      </div>
+
+      {(reportsError || exportError) && (
+        <div
+          role="alert"
+          className="flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-900"
+        >
+          <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
+          <span>{exportError ?? reportsError}</span>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card className="p-5">
-          <p className="text-xs font-medium text-slate-500">Processed Invoice Value</p>
+          <p className="text-xs font-medium text-slate-500">
+            Processed Invoice Value
+          </p>
           <p className="mt-2 font-mono text-xl font-semibold text-slate-900 tabular-nums">
             {formatINR(metrics.totalInvoiceValue)}
           </p>
@@ -91,7 +291,9 @@ export function ReportsPage() {
           <p className="mt-2 font-mono text-xl font-semibold text-slate-900 tabular-nums">
             {formatINR(metrics.totalGst)}
           </p>
-          <p className="mt-1 text-xs text-slate-500">CGST + SGST + IGST combined</p>
+          <p className="mt-1 text-xs text-slate-500">
+            CGST + SGST + IGST + Cess
+          </p>
         </Card>
         <Card className="p-5">
           <p className="text-xs font-medium text-slate-500">Verified Value</p>
@@ -103,12 +305,14 @@ export function ReportsPage() {
           </p>
         </Card>
         <Card className="p-5">
-          <p className="text-xs font-medium text-slate-500">Flagged Value Held</p>
+          <p className="text-xs font-medium text-slate-500">
+            Flagged Value Held
+          </p>
           <p className="mt-2 font-mono text-xl font-semibold text-rose-700 tabular-nums">
             {formatINR(metrics.flaggedValue)}
           </p>
           <p className="mt-1 text-xs text-slate-500 tabular-nums">
-            {metrics.flaggedCount} flagged invoices
+            {metrics.flaggedCount} flagged · {metrics.openFlagCount} open flags
           </p>
         </Card>
       </div>
@@ -126,15 +330,16 @@ export function ReportsPage() {
               >
                 {(
                   [
-                    { label: '6M', value: 6 },
-                    { label: '12M', value: 12 },
+                    { label: '6M', value: '6m' },
+                    { label: '12M', value: '12m' },
                     { label: 'All', value: 'all' },
                   ] as const
                 ).map((option) => (
                   <button
                     key={option.label}
                     type="button"
-                    onClick={() => setTrendWindow(option.value)}
+                    disabled={trendLoading}
+                    onClick={() => void handleWindowChange(option.value)}
                     className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
                       trendWindow === option.value
                         ? 'bg-white text-slate-900 shadow-xs'
@@ -148,15 +353,15 @@ export function ReportsPage() {
             }
           />
           <div className="p-5">
-            {monthlyTrends.length === 0 ? (
+            {monthlyTrend.length === 0 ? (
               <div className="flex h-60 flex-col items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50/70 px-4 text-center">
                 <BarChart3 className="h-6 w-6 text-slate-400" />
                 <p className="mt-2 text-xs font-semibold text-slate-800">
                   No dated invoices to chart
                 </p>
                 <p className="mt-1 text-[11px] text-slate-500">
-                  Invoices with valid YYYY-MM-DD dates appear automatically in this
-                  chronological chart.
+                  Invoices with valid invoice dates appear automatically in this
+                  SQL-aggregated chronological chart.
                 </p>
               </div>
             ) : (
@@ -164,7 +369,7 @@ export function ReportsPage() {
                 <div className="overflow-x-auto">
                   <div className="min-w-[360px]">
                     <div className="flex h-60 items-end justify-between gap-2 border-b border-slate-200 pb-3 pt-4 sm:gap-3">
-                      {monthlyTrends.map((month) => {
+                      {monthlyTrend.map((month) => {
                         const verifiedH = Math.round(
                           (month.verifiedCount / maxMonthlyCount) * 180
                         );
@@ -212,7 +417,7 @@ export function ReportsPage() {
                     </div>
 
                     <div className="mt-2 flex justify-between gap-2 text-center sm:gap-3">
-                      {monthlyTrends.map((month) => (
+                      {monthlyTrend.map((month) => (
                         <div key={month.monthKey} className="min-w-0 flex-1">
                           <p className="truncate text-xs font-medium text-slate-700">
                             {month.label}
@@ -241,10 +446,11 @@ export function ReportsPage() {
                       Flagged
                     </span>
                   </div>
-                  {chartCountTotal !== metrics.totalInvoices && (
+                  {(monthlyTrendMeta.excludedCount > 0 ||
+                    monthlyTrendMeta.outOfWindowCount > 0) && (
                     <span className="text-[11px] text-amber-700">
-                      {metrics.totalInvoices - chartCountTotal} invoice(s) outside window
-                      or undated
+                      {monthlyTrendMeta.excludedCount} undated ·{' '}
+                      {monthlyTrendMeta.outOfWindowCount} outside window
                     </span>
                   )}
                 </div>
@@ -256,7 +462,7 @@ export function ReportsPage() {
         <Card className="lg:col-span-5">
           <CardHeader
             title="Verified vs. Pending vs. Flagged"
-            subtitle="Verification split of current sample register"
+            subtitle="Verification split of workspace accounting ledger"
           />
           <div className="space-y-5 p-5">
             <div className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50 p-4">
@@ -288,7 +494,8 @@ export function ReportsPage() {
                     style={{
                       width: `${
                         metrics.totalInvoices > 0
-                          ? (metrics.verifiedCount / metrics.totalInvoices) * 100
+                          ? (metrics.verifiedCount / metrics.totalInvoices) *
+                            100
                           : 0
                       }%`,
                     }}
@@ -299,7 +506,9 @@ export function ReportsPage() {
 
               <div>
                 <div className="mb-1 flex justify-between">
-                  <span className="font-medium text-slate-700">Pending Review</span>
+                  <span className="font-medium text-slate-700">
+                    Pending Review
+                  </span>
                   <span className="font-mono tabular-nums text-slate-600">
                     {formatINR(metrics.pendingValue)}
                   </span>
@@ -345,40 +554,104 @@ export function ReportsPage() {
 
       <Card>
         <CardHeader
-          title="Flagged Invoices Exception Report"
-          subtitle="Exceptions requiring resolution before accounting export"
+          title="Exceptions & Flagged Invoices Feed"
+          subtitle="Flagged invoices and unresolved variance records requiring human attention"
         />
-        {flaggedList.length === 0 ? (
+        <div className="flex flex-wrap items-center gap-2.5 border-b border-slate-100 px-5 py-3">
+          <div className="relative min-w-[200px] flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <input
+              type="text"
+              value={exSearch}
+              onChange={(e) => {
+                setExSearch(e.target.value);
+                setExPage(1);
+              }}
+              placeholder="Search exceptions by invoice, supplier, GSTIN..."
+              className="h-9 w-full rounded-lg border border-slate-200 bg-slate-50 pl-8 pr-3 text-xs"
+            />
+          </div>
+          <select
+            value={exStatus}
+            onChange={(e) => {
+              setExStatus(
+                e.target.value as '' | 'PENDING_REVIEW' | 'FLAGGED'
+              );
+              setExPage(1);
+            }}
+            aria-label="Filter exceptions by status"
+            className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-xs"
+          >
+            <option value="">All Exception Statuses</option>
+            <option value="FLAGGED">Flagged</option>
+            <option value="PENDING_REVIEW">Pending Review (Variance)</option>
+          </select>
+          <select
+            value={exCategory}
+            onChange={(e) => {
+              setExCategory(e.target.value as '' | FlagCategory);
+              setExPage(1);
+            }}
+            aria-label="Filter exceptions by flag category"
+            className="h-9 rounded-lg border border-slate-200 bg-white px-2.5 text-xs"
+          >
+            <option value="">All Flag Categories</option>
+            <option value="ARITHMETIC_MISMATCH">Arithmetic Mismatch</option>
+            <option value="DUPLICATE_SUSPICION">Duplicate Suspicion</option>
+            <option value="GSTIN_ISSUE">GSTIN Issue</option>
+            <option value="HSN_RATE_MISMATCH">HSN/Rate Mismatch</option>
+            <option value="MISSING_PO_GRN">Missing PO/GRN</option>
+            <option value="CUSTOM">Custom</option>
+          </select>
+        </div>
+
+        {exceptionsError ? (
+          <p className="px-5 py-6 text-xs text-rose-700">{exceptionsError}</p>
+        ) : exceptionsLoading && exceptions.length === 0 ? (
+          <p className="px-5 py-6 text-center text-xs text-slate-500">
+            Loading exceptions feed...
+          </p>
+        ) : exceptions.length === 0 ? (
           <p className="px-5 py-8 text-center text-xs text-slate-500">
-            No flagged invoices currently in queue.
+            No flagged or unresolved variance exceptions match your filters.
           </p>
         ) : (
           <div className="divide-y divide-slate-100">
-            {flaggedList.map((inv) => (
+            {exceptions.map((item) => (
               <div
-                key={inv.id}
+                key={item.invoiceId}
                 className="flex flex-wrap items-center justify-between gap-3 px-5 py-4"
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-mono text-xs font-semibold text-slate-900">
-                      {inv.invoiceNumber}
+                      {item.invoiceNumber}
                     </span>
                     <span className="text-xs text-slate-500">
-                      · {inv.supplierName}
+                      · {item.supplierName}
+                    </span>
+                    <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-700">
+                      {item.reconciliationStatus}
                     </span>
                   </div>
                   <p className="mt-1 text-xs text-rose-700">
-                    {inv.flagReason || 'Flagged for manual audit review.'}
+                    {item.openFlags[0]?.reasonText ??
+                      `Reconciliation variance of ${formatINR(toNumber(item.varianceAmount))}`}
                   </p>
+                  {item.lastAction && (
+                    <p className="mt-0.5 text-[11px] text-slate-400">
+                      Last action: {item.lastAction.actionType} by{' '}
+                      {item.lastAction.actorDisplayName}
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-3">
                   <span className="font-mono text-xs font-semibold tabular-nums text-slate-900">
-                    {formatINR(inv.totalAmount)}
+                    {formatINR(toNumber(item.totalAmount))}
                   </span>
                   <button
                     type="button"
-                    onClick={() => selectInvoiceForReview(inv.id)}
+                    onClick={() => selectInvoiceForReview(item.invoiceId)}
                     className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-indigo-300 hover:text-indigo-700 whitespace-nowrap"
                   >
                     Resolve
@@ -388,6 +661,129 @@ export function ReportsPage() {
             ))}
           </div>
         )}
+
+        <div className="flex items-center justify-between border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
+          <span>
+            {exceptionsTotal} exception record(s)
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={exPage <= 1}
+              onClick={() => setExPage((p) => Math.max(1, p - 1))}
+              className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 disabled:opacity-40"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              Prev
+            </button>
+            <span className="font-mono text-xs tabular-nums">
+              Page {exPage} / {exTotalPages}
+            </span>
+            <button
+              type="button"
+              disabled={exPage >= exTotalPages}
+              onClick={() => setExPage((p) => Math.min(exTotalPages, p + 1))}
+              className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 disabled:opacity-40"
+            >
+              Next
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader
+          title="Workspace Audit Trail"
+          subtitle={
+            activeWorkspaceRole === 'UPLOADER'
+              ? 'Showing your own actor audit events (Uploader scope)'
+              : 'Append-only workspace activity ledger (uploads, edits, approvals, exports)'
+          }
+          action={
+            <input
+              type="text"
+              value={auditEventType}
+              onChange={(e) => {
+                setAuditEventType(e.target.value);
+                setAuditPage(1);
+              }}
+              placeholder="Filter event type (e.g. invoice.verified)"
+              aria-label="Filter audit events by event type"
+              className="h-8 w-56 rounded-lg border border-slate-200 bg-slate-50 px-2.5 font-mono text-[11px]"
+            />
+          }
+        />
+
+        {auditError ? (
+          <p className="px-5 py-6 text-xs text-rose-700">{auditError}</p>
+        ) : auditLoading && auditRows.length === 0 ? (
+          <p className="px-5 py-6 text-center text-xs text-slate-500">
+            Loading audit trail...
+          </p>
+        ) : auditRows.length === 0 ? (
+          <p className="px-5 py-8 text-center text-xs text-slate-500">
+            No audit events matched your filter.
+          </p>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {auditRows.map((evt) => (
+              <div
+                key={evt.id}
+                className="flex flex-wrap items-start justify-between gap-2 px-5 py-3 text-xs"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <History className="h-3.5 w-3.5 text-slate-400" />
+                    <span className="font-semibold text-slate-900">
+                      {evt.actorDisplayName}
+                    </span>
+                    <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-700">
+                      {evt.eventType}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-slate-600">{evt.summary}</p>
+                </div>
+                <span className="shrink-0 font-mono text-[11px] text-slate-400 tabular-nums">
+                  {formatDateIN(evt.createdAt.slice(0, 10))}{' '}
+                  {new Date(evt.createdAt).toLocaleTimeString('en-IN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
+          <span>{auditTotal} audit event(s)</span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={auditPage <= 1}
+              onClick={() => setAuditPage((p) => Math.max(1, p - 1))}
+              className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 disabled:opacity-40"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              Prev
+            </button>
+            <span className="font-mono text-xs tabular-nums">
+              Page {auditPage} / {auditTotalPages}
+            </span>
+            <button
+              type="button"
+              disabled={auditPage >= auditTotalPages}
+              onClick={() =>
+                setAuditPage((p) => Math.min(auditTotalPages, p + 1))
+              }
+              className="inline-flex h-8 items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 disabled:opacity-40"
+            >
+              Next
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
       </Card>
     </div>
   );
