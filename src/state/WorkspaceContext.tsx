@@ -9,6 +9,10 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  DEMO_MODE_DISABLED_ACTION_MESSAGE,
+  isDemoModeEnabled,
+} from '../config/demoMode';
+import {
   apiClient,
   formatApiErrorMessage,
   type FlagInvoicePayload,
@@ -29,6 +33,21 @@ import {
   mapSupplierSummaryDto,
   mapWorkspaceSettingsDto,
 } from '../services/apiMappers';
+import {
+  DEMO_ORGANIZATIONS,
+  DEMO_USER,
+  DEMO_WORKSPACES,
+  DEMO_WORKSPACE_ID,
+  getDemoInvoiceDetail,
+  getDemoInvoices,
+  getDemoMonthlyTrend,
+  getDemoReportSummary,
+  getDemoReviewHistory,
+  getDemoSettings,
+  getDemoSuppliers,
+  listDemoAuditEvents,
+  listDemoReportExceptions,
+} from '../services/demoDataService';
 import type {
   ActivityEvent,
   ApiAuditEvent,
@@ -177,6 +196,7 @@ function isAbortError(err: unknown): boolean {
 }
 
 interface WorkspaceContextValue {
+  isDemoMode: boolean;
   authStatus: AuthStatus;
   currentUser: AuthenticatedUser | null;
   organizations: OrganizationSummary[];
@@ -292,16 +312,22 @@ const WorkspaceContext = createContext<WorkspaceContextValue | undefined>(
 );
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
-  const [authStatus, setAuthStatus] = useState<AuthStatus>('checking');
-  const [currentUser, setCurrentUser] = useState<AuthenticatedUser | null>(
-    null
+  const isDemoMode = isDemoModeEnabled();
+
+  const [authStatus, setAuthStatus] = useState<AuthStatus>(() =>
+    isDemoMode ? 'authenticated' : 'checking'
   );
-  const [organizations, setOrganizations] = useState<OrganizationSummary[]>([]);
+  const [currentUser, setCurrentUser] = useState<AuthenticatedUser | null>(
+    () => (isDemoMode ? DEMO_USER : null)
+  );
+  const [organizations, setOrganizations] = useState<OrganizationSummary[]>(
+    () => (isDemoMode ? DEMO_ORGANIZATIONS : [])
+  );
   const [workspaces, setWorkspaces] = useState<WorkspaceMembershipSummary[]>(
-    []
+    () => (isDemoMode ? DEMO_WORKSPACES : [])
   );
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(
-    () => readStoredWorkspaceId()
+    () => (isDemoMode ? DEMO_WORKSPACE_ID : readStoredWorkspaceId())
   );
   const [sessionExpiredMessage, setSessionExpiredMessage] = useState<
     string | null
@@ -420,15 +446,29 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
+    if (isDemoMode) {
+      apiClient.setUnauthorizedHandler(null);
+      return;
+    }
     apiClient.setUnauthorizedHandler(() => {
       clearSessionState('Your session expired. Please sign in again.');
     });
     return () => {
       apiClient.setUnauthorizedHandler(null);
     };
-  }, [clearSessionState]);
+  }, [clearSessionState, isDemoMode]);
 
   const hydrateSession = useCallback(async () => {
+    if (isDemoMode) {
+      setCurrentUser(DEMO_USER);
+      setOrganizations(DEMO_ORGANIZATIONS);
+      setWorkspaces(DEMO_WORKSPACES);
+      setActiveWorkspaceId(DEMO_WORKSPACE_ID);
+      setSessionExpiredMessage(null);
+      setAuthStatus('authenticated');
+      return;
+    }
+
     setAuthStatus('checking');
     try {
       const me = await apiClient.getMe();
@@ -446,7 +486,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     } catch {
       clearSessionState(null);
     }
-  }, [clearSessionState]);
+  }, [clearSessionState, isDemoMode]);
 
   useEffect(() => {
     void hydrateSession();
@@ -457,13 +497,49 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       workspaceId: string,
       options?: { trendWindow?: '6m' | '12m' | 'all' }
     ) => {
+      const requestedWindow = options?.trendWindow ?? trendWindowRef.current;
+      trendWindowRef.current = requestedWindow;
+
+      if (isDemoMode) {
+        const demoInvoices = getDemoInvoices();
+        const demoTrend = getDemoMonthlyTrend(requestedWindow);
+        const demoExceptions = listDemoReportExceptions({
+          page: 1,
+          pageSize: 50,
+        });
+        const demoAudit = listDemoAuditEvents({ page: 1, pageSize: 50 });
+
+        setInvoices(demoInvoices);
+        setInvoicesTotal(demoInvoices.length);
+        setSelectedInvoiceId((prev) =>
+          prev && demoInvoices.some((inv) => inv.id === prev)
+            ? prev
+            : demoInvoices[0]?.id ?? ''
+        );
+        setSuppliers(getDemoSuppliers());
+        setSettings(getDemoSettings());
+        setAuditEvents(demoAudit.items);
+        setAuditEventsTotal(demoAudit.total);
+        setReportSummary(getDemoReportSummary());
+        setMonthlyTrend(demoTrend.items);
+        setMonthlyTrendMeta({
+          window: requestedWindow,
+          excludedCount: demoTrend.excludedCount,
+          outOfWindowCount: demoTrend.outOfWindowCount,
+          currency: demoTrend.currency,
+        });
+        setReportExceptions(demoExceptions.items);
+        setReportExceptionsTotal(demoExceptions.total);
+        setWorkspaceError(null);
+        setReportsError(null);
+        setWorkspaceLoading(false);
+        return;
+      }
+
       workspaceAbortRef.current?.abort();
       const controller = new AbortController();
       workspaceAbortRef.current = controller;
       const reqSeq = ++workspaceSeqRef.current;
-
-      const requestedWindow = options?.trendWindow ?? trendWindowRef.current;
-      trendWindowRef.current = requestedWindow;
 
       setWorkspaceLoading(true);
       setWorkspaceError(null);
@@ -596,7 +672,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    []
+    [isDemoMode]
   );
 
   useEffect(() => {
@@ -615,6 +691,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (!invoiceId) {
         setSelectedInvoiceDetail(null);
         setSelectedReviewHistory(null);
+        setDetailError(null);
+        setDetailLoading(false);
+        return;
+      }
+
+      if (isDemoMode) {
+        setSelectedInvoiceDetail(getDemoInvoiceDetail(invoiceId));
+        setSelectedReviewHistory(getDemoReviewHistory(invoiceId));
         setDetailError(null);
         setDetailLoading(false);
         return;
@@ -663,7 +747,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    []
+    [isDemoMode]
   );
 
   useEffect(() => {
@@ -704,21 +788,30 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(
     async (email: string, password: string) => {
+      if (isDemoMode) {
+        throw new Error(DEMO_MODE_DISABLED_ACTION_MESSAGE);
+      }
       await apiClient.login(email, password);
       await hydrateSession();
     },
-    [hydrateSession]
+    [hydrateSession, isDemoMode]
   );
 
   const register = useCallback(
     async (payload: RegisterApiPayload) => {
+      if (isDemoMode) {
+        throw new Error(DEMO_MODE_DISABLED_ACTION_MESSAGE);
+      }
       await apiClient.register(payload);
       await hydrateSession();
     },
-    [hydrateSession]
+    [hydrateSession, isDemoMode]
   );
 
   const logout = useCallback(async () => {
+    if (isDemoMode) {
+      return;
+    }
     try {
       await apiClient.logout();
     } catch {
@@ -726,7 +819,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     } finally {
       clearSessionState(null);
     }
-  }, [clearSessionState]);
+  }, [clearSessionState, isDemoMode]);
 
   const performWorkspaceSwitch = useCallback(
     (nextWorkspaceId: string) => {
@@ -858,6 +951,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     async (window: '6m' | '12m' | 'all') => {
       if (!activeWorkspaceId) return;
       trendWindowRef.current = window;
+      if (isDemoMode) {
+        const demoTrend = getDemoMonthlyTrend(window);
+        setMonthlyTrend(demoTrend.items);
+        setMonthlyTrendMeta({
+          window,
+          excludedCount: demoTrend.excludedCount,
+          outOfWindowCount: demoTrend.outOfWindowCount,
+          currency: demoTrend.currency,
+        });
+        return;
+      }
       const res = await apiClient.getMonthlyTrend(activeWorkspaceId, {
         window,
       });
@@ -869,7 +973,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         currency: res.currency,
       });
     },
-    [activeWorkspaceId]
+    [activeWorkspaceId, isDemoMode]
   );
 
   const requireWorkspaceId = useCallback((): string => {
@@ -879,12 +983,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     return activeWorkspaceId;
   }, [activeWorkspaceId]);
 
+  const assertMutationsEnabled = useCallback(() => {
+    if (isDemoMode) {
+      throw new Error(DEMO_MODE_DISABLED_ACTION_MESSAGE);
+    }
+  }, [isDemoMode]);
+
   const uploadInvoiceFile = useCallback(
     async (params: {
       file: File;
       supplierName?: string;
       invoiceNumber?: string;
     }) => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       setMutationInFlight(true);
       try {
@@ -907,11 +1018,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setMutationInFlight(false);
       }
     },
-    [loadWorkspaceData, requireWorkspaceId]
+    [assertMutationsEnabled, loadWorkspaceData, requireWorkspaceId]
   );
 
   const createManualInvoice = useCallback(
     async (payload: InvoiceCreatePayload): Promise<Invoice> => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       setMutationInFlight(true);
       try {
@@ -925,11 +1037,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setMutationInFlight(false);
       }
     },
-    [loadWorkspaceData, requireWorkspaceId]
+    [assertMutationsEnabled, loadWorkspaceData, requireWorkspaceId]
   );
 
   const saveInvoiceChanges = useCallback(
     async (original: Invoice, draft: Invoice): Promise<Invoice> => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       const payload = buildInvoiceUpdatePayload(
         original,
@@ -957,6 +1070,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     },
     [
       activeWorkspaceRole,
+      assertMutationsEnabled,
       loadSelectedInvoiceDetail,
       loadWorkspaceData,
       requireWorkspaceId,
@@ -968,6 +1082,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       invoiceId: string,
       payload: VerifyInvoicePayload
     ): Promise<Invoice> => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       setMutationInFlight(true);
       try {
@@ -988,7 +1103,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setMutationInFlight(false);
       }
     },
-    [loadSelectedInvoiceDetail, loadWorkspaceData, requireWorkspaceId]
+    [
+      assertMutationsEnabled,
+      loadSelectedInvoiceDetail,
+      loadWorkspaceData,
+      requireWorkspaceId,
+    ]
   );
 
   const flagInvoiceAction = useCallback(
@@ -996,6 +1116,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       invoiceId: string,
       payload: FlagInvoicePayload
     ): Promise<Invoice> => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       setMutationInFlight(true);
       try {
@@ -1012,11 +1133,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setMutationInFlight(false);
       }
     },
-    [loadSelectedInvoiceDetail, loadWorkspaceData, requireWorkspaceId]
+    [
+      assertMutationsEnabled,
+      loadSelectedInvoiceDetail,
+      loadWorkspaceData,
+      requireWorkspaceId,
+    ]
   );
 
   const resolveFlagAction = useCallback(
     async (flagId: string, payload: ResolveFlagPayload): Promise<void> => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       setMutationInFlight(true);
       try {
@@ -1029,11 +1156,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setMutationInFlight(false);
       }
     },
-    [loadSelectedInvoiceDetail, loadWorkspaceData, requireWorkspaceId]
+    [
+      assertMutationsEnabled,
+      loadSelectedInvoiceDetail,
+      loadWorkspaceData,
+      requireWorkspaceId,
+    ]
   );
 
   const reopenInvoiceAction = useCallback(
     async (invoiceId: string, reason: string): Promise<Invoice> => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       setMutationInFlight(true);
       try {
@@ -1053,11 +1186,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setMutationInFlight(false);
       }
     },
-    [loadSelectedInvoiceDetail, loadWorkspaceData, requireWorkspaceId]
+    [
+      assertMutationsEnabled,
+      loadSelectedInvoiceDetail,
+      loadWorkspaceData,
+      requireWorkspaceId,
+    ]
   );
 
   const deleteInvoiceAction = useCallback(
     async (invoiceId: string, deletionReason?: string): Promise<void> => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       setMutationInFlight(true);
       try {
@@ -1073,11 +1212,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setMutationInFlight(false);
       }
     },
-    [loadWorkspaceData, requireWorkspaceId, selectedInvoiceId]
+    [
+      assertMutationsEnabled,
+      loadWorkspaceData,
+      requireWorkspaceId,
+      selectedInvoiceId,
+    ]
   );
 
   const createSupplierAction = useCallback(
     async (payload: SupplierCreatePayload): Promise<SupplierSummary> => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       setMutationInFlight(true);
       try {
@@ -1088,7 +1233,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setMutationInFlight(false);
       }
     },
-    [loadWorkspaceData, requireWorkspaceId]
+    [assertMutationsEnabled, loadWorkspaceData, requireWorkspaceId]
   );
 
   const updateSupplierAction = useCallback(
@@ -1096,6 +1241,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       supplierId: string,
       payload: SupplierUpdatePayload
     ): Promise<SupplierSummary> => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       setMutationInFlight(true);
       try {
@@ -1110,13 +1256,14 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setMutationInFlight(false);
       }
     },
-    [loadWorkspaceData, requireWorkspaceId]
+    [assertMutationsEnabled, loadWorkspaceData, requireWorkspaceId]
   );
 
   const updateSettingsAction = useCallback(
     async (
       payload: WorkspaceSettingsUpdatePayload
     ): Promise<WorkspaceSettings> => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       setMutationInFlight(true);
       try {
@@ -1145,7 +1292,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setMutationInFlight(false);
       }
     },
-    [activeWorkspace, requireWorkspaceId]
+    [activeWorkspace, assertMutationsEnabled, requireWorkspaceId]
   );
 
   const exportCsvReport = useCallback(
@@ -1155,6 +1302,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       dateTo?: string;
       currency?: string;
     }): Promise<string> => {
+      assertMutationsEnabled();
       const wsId = requireWorkspaceId();
       const { filename, blob } = await apiClient.downloadReportCsv(wsId, params);
 
@@ -1175,7 +1323,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       void loadWorkspaceData(wsId);
       return filename;
     },
-    [loadWorkspaceData, requireWorkspaceId]
+    [assertMutationsEnabled, loadWorkspaceData, requireWorkspaceId]
   );
 
   const updateLocalUiPrefs = useCallback((prefs: LocalUiPreferences) => {
@@ -1241,6 +1389,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<WorkspaceContextValue>(
     () => ({
+      isDemoMode,
       authStatus,
       currentUser,
       organizations,
@@ -1307,6 +1456,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       markAllNotificationsRead,
     }),
     [
+      isDemoMode,
       authStatus,
       currentUser,
       organizations,

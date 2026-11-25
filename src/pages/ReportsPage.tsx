@@ -8,11 +8,17 @@ import {
   FileSpreadsheet,
   History,
   Info,
+  Lock,
   Search,
 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Card, CardHeader } from '../components/common/Card';
+import { DEMO_MODE_DISABLED_ACTION_MESSAGE } from '../config/demoMode';
 import { apiClient, formatApiErrorMessage } from '../services/apiClient';
+import {
+  listDemoAuditEvents,
+  listDemoReportExceptions,
+} from '../services/demoDataService';
 import { formatDateIN, formatINR, formatINRCompact } from '../services/formatters';
 import { useWorkspace } from '../state/WorkspaceContext';
 import type {
@@ -29,6 +35,7 @@ function toNumber(val: string | number | undefined | null): number {
 
 export function ReportsPage() {
   const {
+    isDemoMode,
     activeWorkspaceId,
     activeWorkspaceRole,
     reportSummary,
@@ -66,13 +73,29 @@ export function ReportsPage() {
   const [exportError, setExportError] = useState<string | null>(null);
 
   const canExportCsv =
-    activeWorkspaceRole === 'WORKSPACE_ADMIN' ||
-    activeWorkspaceRole === 'REVIEWER' ||
-    activeWorkspaceRole === 'VIEWER';
+    !isDemoMode &&
+    (activeWorkspaceRole === 'WORKSPACE_ADMIN' ||
+      activeWorkspaceRole === 'REVIEWER' ||
+      activeWorkspaceRole === 'VIEWER');
 
   const fetchExceptions = useCallback(
     async (signal?: AbortSignal) => {
       if (!activeWorkspaceId) return;
+      if (isDemoMode) {
+        const res = listDemoReportExceptions({
+          search: exSearch.trim() || undefined,
+          status: exStatus,
+          flagCategory: exCategory,
+          page: exPage,
+          pageSize: 10,
+        });
+        setExceptions(res.items);
+        setExceptionsTotal(res.total);
+        setExceptionsError(null);
+        setExceptionsLoading(false);
+        return;
+      }
+
       setExceptionsLoading(true);
       setExceptionsError(null);
       try {
@@ -97,12 +120,25 @@ export function ReportsPage() {
         if (!signal?.aborted) setExceptionsLoading(false);
       }
     },
-    [activeWorkspaceId, exCategory, exPage, exSearch, exStatus]
+    [activeWorkspaceId, exCategory, exPage, exSearch, exStatus, isDemoMode]
   );
 
   const fetchAuditTrail = useCallback(
     async (signal?: AbortSignal) => {
       if (!activeWorkspaceId) return;
+      if (isDemoMode) {
+        const res = listDemoAuditEvents({
+          eventType: auditEventType.trim() || undefined,
+          page: auditPage,
+          pageSize: 15,
+        });
+        setAuditRows(res.items);
+        setAuditTotal(res.total);
+        setAuditError(null);
+        setAuditLoading(false);
+        return;
+      }
+
       setAuditLoading(true);
       setAuditError(null);
       try {
@@ -125,7 +161,7 @@ export function ReportsPage() {
         if (!signal?.aborted) setAuditLoading(false);
       }
     },
-    [activeWorkspaceId, auditEventType, auditPage]
+    [activeWorkspaceId, auditEventType, auditPage, isDemoMode]
   );
 
   useEffect(() => {
@@ -225,9 +261,11 @@ export function ReportsPage() {
             disabled={!canExportCsv || exporting}
             onClick={() => void handleExportCsv()}
             title={
-              canExportCsv
-                ? 'Download formula-safe UTF-8 CSV from server'
-                : 'CSV export requires VIEWER, REVIEWER, or WORKSPACE_ADMIN role'
+              isDemoMode
+                ? DEMO_MODE_DISABLED_ACTION_MESSAGE
+                : canExportCsv
+                  ? 'Download formula-safe UTF-8 CSV from server'
+                  : 'CSV export requires VIEWER, REVIEWER, or WORKSPACE_ADMIN role'
             }
             className="inline-flex h-10 items-center gap-2 rounded-lg bg-slate-900 px-4 text-xs font-semibold text-white hover:bg-slate-800 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -254,6 +292,17 @@ export function ReportsPage() {
           </button>
         </div>
       </div>
+
+      {isDemoMode && (
+        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-100 px-4 py-2.5 text-xs text-slate-700">
+          <Lock className="h-4 w-4 shrink-0 text-slate-500" />
+          <span>
+            <strong>Demo Mode (Sample Data):</strong> Explore sample KPIs,
+            monthly trend windows, exception filters, and audit history. Server
+            CSV export is unavailable in read-only demo preview.
+          </span>
+        </div>
+      )}
 
       <div className="flex items-start gap-2.5 rounded-xl border border-indigo-200 bg-indigo-50/70 px-4 py-3 text-xs text-indigo-950">
         <Info className="mt-0.5 h-4 w-4 shrink-0 text-indigo-600" />
@@ -558,7 +607,7 @@ export function ReportsPage() {
           subtitle="Flagged invoices and unresolved variance records requiring human attention"
         />
         <div className="flex flex-wrap items-center gap-2.5 border-b border-slate-100 px-5 py-3">
-          <div className="relative min-w-[200px] flex-1">
+          <div className="relative w-full min-w-0 sm:min-w-[200px] sm:flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
@@ -662,7 +711,7 @@ export function ReportsPage() {
           </div>
         )}
 
-        <div className="flex items-center justify-between border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
           <span>
             {exceptionsTotal} exception record(s)
           </span>
@@ -710,7 +759,7 @@ export function ReportsPage() {
               }}
               placeholder="Filter event type (e.g. invoice.verified)"
               aria-label="Filter audit events by event type"
-              className="h-8 w-56 rounded-lg border border-slate-200 bg-slate-50 px-2.5 font-mono text-[11px]"
+              className="h-9 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 font-mono text-[11px] sm:w-56"
             />
           }
         />
@@ -756,7 +805,7 @@ export function ReportsPage() {
           </div>
         )}
 
-        <div className="flex items-center justify-between border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
           <span>{auditTotal} audit event(s)</span>
           <div className="flex items-center gap-2">
             <button

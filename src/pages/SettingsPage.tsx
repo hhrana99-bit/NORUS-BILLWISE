@@ -1,12 +1,14 @@
 import { Check, Lock, ShieldCheck } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 import { Card, CardHeader } from '../components/common/Card';
+import { DEMO_MODE_DISABLED_ACTION_MESSAGE } from '../config/demoMode';
 import { formatApiErrorMessage } from '../services/apiClient';
 import { useWorkspace } from '../state/WorkspaceContext';
 import type { WorkspaceSettings } from '../types/domain';
 
 export function SettingsPage() {
   const {
+    isDemoMode,
     activeWorkspaceId,
     activeWorkspaceRole,
     settings,
@@ -23,7 +25,8 @@ export function SettingsPage() {
   const [savedNotice, setSavedNotice] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const isWorkspaceAdmin = activeWorkspaceRole === 'WORKSPACE_ADMIN';
+  const isWorkspaceAdmin =
+    !isDemoMode && activeWorkspaceRole === 'WORKSPACE_ADMIN';
 
   useEffect(() => {
     setForm(settings);
@@ -34,7 +37,7 @@ export function SettingsPage() {
 
   const handleSave = async (e: FormEvent) => {
     e.preventDefault();
-    if (!isWorkspaceAdmin) return;
+    if (isDemoMode || !isWorkspaceAdmin) return;
     setSaveError(null);
 
     const parsedTolerance = Number(roundingInput);
@@ -83,6 +86,7 @@ export function SettingsPage() {
         <button
           type="submit"
           disabled={!isWorkspaceAdmin || mutationInFlight}
+          title={isDemoMode ? DEMO_MODE_DISABLED_ACTION_MESSAGE : undefined}
           className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-indigo-600 px-4 text-xs font-semibold text-white hover:bg-indigo-700 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
         >
           {savedNotice ? (
@@ -102,8 +106,18 @@ export function SettingsPage() {
         <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-100 px-4 py-2.5 text-xs text-slate-700">
           <Lock className="h-4 w-4 shrink-0 text-slate-500" />
           <span>
-            Read-only workspace settings: only a <strong>Workspace Admin</strong>{' '}
-            can modify persisted workspace preferences.
+            {isDemoMode ? (
+              <>
+                <strong>Demo Mode (Sample Data):</strong> Workspace settings
+                cannot be modified or saved in read-only demo preview.
+              </>
+            ) : (
+              <>
+                Read-only workspace settings: only a{' '}
+                <strong>Workspace Admin</strong> can modify persisted workspace
+                preferences.
+              </>
+            )}
           </span>
         </div>
       )}

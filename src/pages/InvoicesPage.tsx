@@ -5,6 +5,7 @@ import {
   Eye,
   FileText,
   Filter,
+  Lock,
   Plus,
   Search,
   Trash2,
@@ -17,11 +18,13 @@ import { Card } from '../components/common/Card';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { EmptyState } from '../components/common/EmptyState';
 import { UploadInvoiceModal } from '../components/invoices/UploadInvoiceModal';
+import { DEMO_MODE_DISABLED_ACTION_MESSAGE } from '../config/demoMode';
 import { apiClient, formatApiErrorMessage } from '../services/apiClient';
 import {
   mapInvoiceSummaryDto,
   mapUiInvoiceStatusToApi,
 } from '../services/apiMappers';
+import { listDemoInvoices } from '../services/demoDataService';
 import { formatDateIN, formatINR, getTotalTax } from '../services/formatters';
 import type {
   InvoiceSortField,
@@ -34,6 +37,7 @@ const PAGE_SIZE = 20;
 
 export function InvoicesPage() {
   const {
+    isDemoMode,
     activeWorkspaceId,
     activeWorkspaceRole,
     suppliers,
@@ -77,10 +81,12 @@ export function InvoicesPage() {
   const [manualError, setManualError] = useState<string | null>(null);
 
   const canCreateOrUpload =
-    activeWorkspaceRole === 'WORKSPACE_ADMIN' ||
-    activeWorkspaceRole === 'REVIEWER' ||
-    activeWorkspaceRole === 'UPLOADER';
-  const isWorkspaceAdmin = activeWorkspaceRole === 'WORKSPACE_ADMIN';
+    !isDemoMode &&
+    (activeWorkspaceRole === 'WORKSPACE_ADMIN' ||
+      activeWorkspaceRole === 'REVIEWER' ||
+      activeWorkspaceRole === 'UPLOADER');
+  const isWorkspaceAdmin =
+    !isDemoMode && activeWorkspaceRole === 'WORKSPACE_ADMIN';
 
   const activeSupplierName = supplierFilterId
     ? suppliers.find((s) => s.id === supplierFilterId)?.name
@@ -89,6 +95,24 @@ export function InvoicesPage() {
   const fetchInvoices = useCallback(
     async (signal?: AbortSignal) => {
       if (!activeWorkspaceId) return;
+      if (isDemoMode) {
+        const res = listDemoInvoices({
+          search: search.trim() || undefined,
+          status: statusFilter,
+          taxType: taxTypeFilter,
+          supplierId: supplierFilterId,
+          sortBy: sortField,
+          sortDir: sortDirection,
+          page,
+          pageSize: PAGE_SIZE,
+        });
+        setRows(res.items);
+        setTotal(res.total);
+        setLoadError(null);
+        setLoading(false);
+        return;
+      }
+
       setLoading(true);
       setLoadError(null);
       try {
@@ -126,6 +150,7 @@ export function InvoicesPage() {
     },
     [
       activeWorkspaceId,
+      isDemoMode,
       page,
       search,
       sortDirection,
@@ -171,6 +196,7 @@ export function InvoicesPage() {
 
   const handleCreateManual = async (e: FormEvent) => {
     e.preventDefault();
+    if (isDemoMode) return;
     setManualError(null);
     if (!manualInvoiceNumber.trim()) {
       setManualError('Invoice number is required.');
@@ -203,7 +229,7 @@ export function InvoicesPage() {
   };
 
   const handleDeleteConfirm = async () => {
-    if (!pendingDelete) return;
+    if (isDemoMode || !pendingDelete) return;
     setActionError(null);
     const targetId = pendingDelete.id;
     setPendingDelete(null);
@@ -251,6 +277,7 @@ export function InvoicesPage() {
           <button
             type="button"
             disabled={!canCreateOrUpload}
+            title={isDemoMode ? DEMO_MODE_DISABLED_ACTION_MESSAGE : undefined}
             onClick={() => {
               setManualError(null);
               setManualModalOpen(true);
@@ -263,6 +290,7 @@ export function InvoicesPage() {
           <button
             type="button"
             disabled={!canCreateOrUpload}
+            title={isDemoMode ? DEMO_MODE_DISABLED_ACTION_MESSAGE : undefined}
             onClick={() => setUploadOpen(true)}
             className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -271,6 +299,17 @@ export function InvoicesPage() {
           </button>
         </div>
       </div>
+
+      {isDemoMode && (
+        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-100 px-4 py-2.5 text-xs text-slate-700">
+          <Lock className="h-4 w-4 shrink-0 text-slate-500" />
+          <span>
+            <strong>Demo Mode (Sample Data):</strong> Search, filter, sort, and
+            inspect sample invoices below. Uploads, manual invoice creation, and
+            deletions are unavailable in read-only demo mode.
+          </span>
+        </div>
+      )}
 
       {(loadError || actionError) && (
         <div

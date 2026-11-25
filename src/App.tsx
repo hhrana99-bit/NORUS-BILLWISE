@@ -67,6 +67,7 @@ function WorkspaceRouter() {
 
 function AuthenticatedApp() {
   const {
+    isDemoMode,
     authStatus,
     workspaces,
     activeWorkspaceId,
@@ -75,7 +76,7 @@ function AuthenticatedApp() {
     logout,
   } = useWorkspace();
 
-  if (authStatus === 'checking') {
+  if (!isDemoMode && authStatus === 'checking') {
     return (
       <div
         role="status"
@@ -92,7 +93,7 @@ function AuthenticatedApp() {
     );
   }
 
-  if (authStatus === 'unauthenticated') {
+  if (!isDemoMode && authStatus === 'unauthenticated') {
     return <AuthScreen />;
   }
 

@@ -16,6 +16,7 @@ import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { EmptyState } from '../components/common/EmptyState';
 import { DocumentPreview } from '../components/invoices/DocumentPreview';
 import { FlagInvoiceModal } from '../components/invoices/FlagInvoiceModal';
+import { DEMO_MODE_DISABLED_ACTION_MESSAGE } from '../config/demoMode';
 import { formatApiErrorMessage } from '../services/apiClient';
 import { formatDateIN, formatINR } from '../services/formatters';
 import {
@@ -33,6 +34,7 @@ import type {
 
 export function ReviewCentrePage() {
   const {
+    isDemoMode,
     activeWorkspaceId,
     activeWorkspaceRole,
     invoices,
@@ -164,15 +166,18 @@ export function ReviewCentrePage() {
   }
 
   const isReviewerOrAdmin =
-    activeWorkspaceRole === 'WORKSPACE_ADMIN' ||
-    activeWorkspaceRole === 'REVIEWER';
-  const isWorkspaceAdmin = activeWorkspaceRole === 'WORKSPACE_ADMIN';
-  const isUploader = activeWorkspaceRole === 'UPLOADER';
-  const isViewer = activeWorkspaceRole === 'VIEWER';
+    !isDemoMode &&
+    (activeWorkspaceRole === 'WORKSPACE_ADMIN' ||
+      activeWorkspaceRole === 'REVIEWER');
+  const isWorkspaceAdmin =
+    !isDemoMode && activeWorkspaceRole === 'WORKSPACE_ADMIN';
+  const isUploader = !isDemoMode && activeWorkspaceRole === 'UPLOADER';
+  const isViewer = !isDemoMode && activeWorkspaceRole === 'VIEWER';
 
   const isVerifiedLocked = draft.status === 'Verified';
   const isUploaderFlagLocked = isUploader && draft.status === 'Flagged';
-  const canEditFields = !isViewer && !isVerifiedLocked && !isUploaderFlagLocked;
+  const canEditFields =
+    !isDemoMode && !isViewer && !isVerifiedLocked && !isUploaderFlagLocked;
 
   const check = computeArithmeticCheck(draft);
   const openFlags = (draft.reviewFlags ?? []).filter(
@@ -240,7 +245,7 @@ export function ReviewCentrePage() {
   };
 
   const handleSaveChanges = async () => {
-    if (!currentInvoice || !canEditFields) return;
+    if (isDemoMode || !currentInvoice || !canEditFields) return;
     setActionError(null);
     setFeedbackBanner('');
     try {
@@ -252,6 +257,7 @@ export function ReviewCentrePage() {
   };
 
   const openVerifyModal = () => {
+    if (isDemoMode) return;
     setActionError(null);
     setVerifyAckVariance(false);
     setVerifyNote('');
@@ -261,7 +267,7 @@ export function ReviewCentrePage() {
   };
 
   const handleVerifySubmit = async () => {
-    if (!currentInvoice || !isReviewerOrAdmin) return;
+    if (isDemoMode || !currentInvoice || !isReviewerOrAdmin) return;
     setActionError(null);
     setFeedbackBanner('');
 
@@ -310,7 +316,7 @@ export function ReviewCentrePage() {
     flagCategory: FlagCategory,
     reasonText: string
   ) => {
-    if (!currentInvoice || !isReviewerOrAdmin) return;
+    if (isDemoMode || !currentInvoice || !isReviewerOrAdmin) return;
     setActionError(null);
     setFeedbackBanner('');
     try {
@@ -326,7 +332,7 @@ export function ReviewCentrePage() {
   };
 
   const handleResolveFlagSubmit = async () => {
-    if (!resolvingFlag || !isReviewerOrAdmin) return;
+    if (isDemoMode || !resolvingFlag || !isReviewerOrAdmin) return;
     if (!resolveNote.trim()) {
       setActionError('Resolution note is required.');
       return;
@@ -348,7 +354,7 @@ export function ReviewCentrePage() {
   };
 
   const handleReopenSubmit = async () => {
-    if (!isReviewerOrAdmin) return;
+    if (isDemoMode || !isReviewerOrAdmin) return;
     if (!reopenReason.trim()) {
       setActionError('Enter a reason to reopen this invoice to Pending Review.');
       return;
@@ -366,7 +372,7 @@ export function ReviewCentrePage() {
   };
 
   const handleConfirmDelete = async () => {
-    if (!isWorkspaceAdmin) return;
+    if (isDemoMode || !isWorkspaceAdmin) return;
     const deletedNumber = draft.invoiceNumber;
     setDeleteDialogOpen(false);
     setActionError(null);
@@ -441,73 +447,118 @@ export function ReviewCentrePage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {isWorkspaceAdmin && draft.status !== 'Verified' && (
-            <button
-              type="button"
-              disabled={mutationInFlight}
-              onClick={() => setDeleteDialogOpen(true)}
-              aria-label={`Soft-delete invoice ${draft.invoiceNumber}`}
-              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-rose-600 hover:border-rose-200 hover:bg-rose-50 whitespace-nowrap disabled:opacity-50"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete
-            </button>
-          )}
-          {canEditFields && (
-            <button
-              type="button"
-              disabled={mutationInFlight || !hasUnsavedChanges}
-              onClick={() => void handleSaveChanges()}
-              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-4 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Save className="h-3.5 w-3.5" />
-              Save Changes
-            </button>
-          )}
-          {canReopen && (
-            <button
-              type="button"
-              disabled={mutationInFlight}
-              onClick={() => {
-                setActionError(null);
-                setReopenReason('');
-                setReopenDialogOpen(true);
-              }}
-              className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-4 text-xs font-semibold text-amber-800 hover:bg-amber-100 whitespace-nowrap disabled:opacity-50"
-            >
-              <RotateCcw className="h-3.5 w-3.5" />
-              Reopen
-            </button>
-          )}
-          {isReviewerOrAdmin && (
+          {isDemoMode ? (
             <>
               <button
                 type="button"
-                disabled={mutationInFlight}
-                onClick={() => {
-                  setActionError(null);
-                  setFlagModalOpen(true);
-                }}
-                className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-4 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap disabled:opacity-50"
+                disabled
+                title={DEMO_MODE_DISABLED_ACTION_MESSAGE}
+                className="inline-flex h-10 cursor-not-allowed items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-4 text-xs font-semibold text-slate-400 opacity-60 whitespace-nowrap"
+              >
+                <Save className="h-3.5 w-3.5" />
+                Save Changes
+              </button>
+              <button
+                type="button"
+                disabled
+                title={DEMO_MODE_DISABLED_ACTION_MESSAGE}
+                className="inline-flex h-10 cursor-not-allowed items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-4 text-xs font-semibold text-rose-500 opacity-60 whitespace-nowrap"
               >
                 <Flag className="h-3.5 w-3.5" />
                 Flag for Review
               </button>
-              {!isVerifiedLocked && (
+              <button
+                type="button"
+                disabled
+                title={DEMO_MODE_DISABLED_ACTION_MESSAGE}
+                className="inline-flex h-10 cursor-not-allowed items-center gap-1.5 rounded-lg bg-emerald-600 px-4 text-xs font-semibold text-white opacity-50 whitespace-nowrap"
+              >
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                Mark as Verified
+              </button>
+            </>
+          ) : (
+            <>
+              {isWorkspaceAdmin && draft.status !== 'Verified' && (
                 <button
                   type="button"
                   disabled={mutationInFlight}
-                  onClick={openVerifyModal}
-                  className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-emerald-600 px-4 text-xs font-semibold text-white hover:bg-emerald-700 whitespace-nowrap disabled:opacity-50"
+                  onClick={() => setDeleteDialogOpen(true)}
+                  aria-label={`Soft-delete invoice ${draft.invoiceNumber}`}
+                  className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-rose-600 hover:border-rose-200 hover:bg-rose-50 whitespace-nowrap disabled:opacity-50"
                 >
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                  Mark as Verified
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Delete
                 </button>
+              )}
+              {canEditFields && (
+                <button
+                  type="button"
+                  disabled={mutationInFlight || !hasUnsavedChanges}
+                  onClick={() => void handleSaveChanges()}
+                  className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-4 text-xs font-semibold text-slate-700 hover:bg-slate-50 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Save className="h-3.5 w-3.5" />
+                  Save Changes
+                </button>
+              )}
+              {canReopen && (
+                <button
+                  type="button"
+                  disabled={mutationInFlight}
+                  onClick={() => {
+                    setActionError(null);
+                    setReopenReason('');
+                    setReopenDialogOpen(true);
+                  }}
+                  className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-4 text-xs font-semibold text-amber-800 hover:bg-amber-100 whitespace-nowrap disabled:opacity-50"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Reopen
+                </button>
+              )}
+              {isReviewerOrAdmin && (
+                <>
+                  <button
+                    type="button"
+                    disabled={mutationInFlight}
+                    onClick={() => {
+                      setActionError(null);
+                      setFlagModalOpen(true);
+                    }}
+                    className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-4 text-xs font-semibold text-rose-700 hover:bg-rose-100 whitespace-nowrap disabled:opacity-50"
+                  >
+                    <Flag className="h-3.5 w-3.5" />
+                    Flag for Review
+                  </button>
+                  {!isVerifiedLocked && (
+                    <button
+                      type="button"
+                      disabled={mutationInFlight}
+                      onClick={openVerifyModal}
+                      className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-emerald-600 px-4 text-xs font-semibold text-white hover:bg-emerald-700 whitespace-nowrap disabled:opacity-50"
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      Mark as Verified
+                    </button>
+                  )}
+                </>
               )}
             </>
           )}
         </div>
       </div>
+
+      {isDemoMode && (
+        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-100 px-4 py-2.5 text-xs text-slate-700">
+          <Lock className="h-4 w-4 shrink-0 text-slate-500" />
+          <span>
+            <strong>Demo Mode (Sample Data):</strong> Field edits, saving,
+            verifying, flagging, resolving flags, reopening, and deletions are
+            unavailable in read-only sample preview.
+          </span>
+        </div>
+      )}
 
       {isVerifiedLocked && (
         <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50/70 px-4 py-2.5 text-xs text-emerald-950">
@@ -597,6 +648,7 @@ export function ReviewCentrePage() {
             invoice={draft}
             focusedField={focusedField}
             settings={settings}
+            isDemoMode={isDemoMode}
           />
         </div>
 
@@ -894,9 +946,13 @@ export function ReviewCentrePage() {
                         {flag.createdByName ? ` by ${flag.createdByName}` : ''}
                       </p>
                     </div>
-                    {isReviewerOrAdmin && (
+                    {(isReviewerOrAdmin || isDemoMode) && (
                       <button
                         type="button"
+                        disabled={isDemoMode}
+                        title={
+                          isDemoMode ? DEMO_MODE_DISABLED_ACTION_MESSAGE : undefined
+                        }
                         onClick={() => {
                           setActionError(null);
                           setResolvingFlag(flag);
@@ -904,7 +960,7 @@ export function ReviewCentrePage() {
                           setResolveNote('');
                           setResolveReopenToPending(true);
                         }}
-                        className="shrink-0 rounded-md border border-rose-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-rose-800 hover:bg-rose-100"
+                        className="shrink-0 rounded-md border border-rose-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-rose-800 hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         Resolve / Dismiss
                       </button>

@@ -21,6 +21,7 @@ function toNumber(val: string | number | undefined | null): number {
 
 export function DashboardPage() {
   const {
+    isDemoMode,
     activeWorkspace,
     invoices,
     suppliers,
@@ -93,8 +94,9 @@ export function DashboardPage() {
               {activeWorkspace?.name ?? 'Active Workspace'} (
               {activeWorkspace?.workspaceCode ?? 'WS'}):
             </strong>{' '}
-            Live SQL-backed accounting register with mandatory human review
-            sign-off.
+            {isDemoMode
+              ? 'Synthetic sample dataset (read-only preview) — demo uploads, edits, approvals, and exports are disabled.'
+              : 'Live SQL-backed accounting register with mandatory human review sign-off.'}
           </span>
         </div>
         <button

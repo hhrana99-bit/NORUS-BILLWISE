@@ -7,7 +7,13 @@ import {defineConfig} from 'vite';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export default defineConfig(() => {
+export default defineConfig(({mode}) => {
+  if (mode === 'production' && process.env.VITE_DEMO_MODE === 'true') {
+    console.warn(
+      '[NORUS BILLWISE SECURITY WARNING] VITE_DEMO_MODE="true" is active in a production build. Sign-in is bypassed with read-only synthetic sample data. Do NOT deploy this build for real customer workspaces.'
+    );
+  }
+
   return {
     plugins: [
       react(),

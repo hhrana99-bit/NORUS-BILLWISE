@@ -1,8 +1,17 @@
-import { Building2, ExternalLink, Pencil, Plus, Search, X } from 'lucide-react';
+import {
+  Building2,
+  ExternalLink,
+  Lock,
+  Pencil,
+  Plus,
+  Search,
+  X,
+} from 'lucide-react';
 import { useMemo, useState, type FormEvent } from 'react';
 import { StatusBadge } from '../components/common/Badge';
 import { Card } from '../components/common/Card';
 import { EmptyState } from '../components/common/EmptyState';
+import { DEMO_MODE_DISABLED_ACTION_MESSAGE } from '../config/demoMode';
 import { formatApiErrorMessage } from '../services/apiClient';
 import { mapUiSupplierStatusToApi } from '../services/apiMappers';
 import { formatDateIN, formatINR } from '../services/formatters';
@@ -11,6 +20,7 @@ import type { SupplierStatus, SupplierSummary } from '../types/domain';
 
 export function SuppliersPage() {
   const {
+    isDemoMode,
     suppliers,
     activeWorkspaceRole,
     navigate,
@@ -36,8 +46,9 @@ export function SuppliersPage() {
   const [formError, setFormError] = useState<string | null>(null);
 
   const canManageSuppliers =
-    activeWorkspaceRole === 'WORKSPACE_ADMIN' ||
-    activeWorkspaceRole === 'REVIEWER';
+    !isDemoMode &&
+    (activeWorkspaceRole === 'WORKSPACE_ADMIN' ||
+      activeWorkspaceRole === 'REVIEWER');
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -76,6 +87,7 @@ export function SuppliersPage() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (isDemoMode) return;
     if (!name.trim()) {
       setFormError('Supplier name is required.');
       return;
@@ -117,17 +129,30 @@ export function SuppliersPage() {
             invoice totals.
           </p>
         </div>
-        {canManageSuppliers && (
+        {(canManageSuppliers || isDemoMode) && (
           <button
             type="button"
+            disabled={isDemoMode}
+            title={isDemoMode ? DEMO_MODE_DISABLED_ACTION_MESSAGE : undefined}
             onClick={openCreateModal}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 whitespace-nowrap disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Plus className="h-4 w-4" />
             Add Supplier
           </button>
         )}
       </div>
+
+      {isDemoMode && (
+        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-100 px-4 py-2.5 text-xs text-slate-700">
+          <Lock className="h-4 w-4 shrink-0 text-slate-500" />
+          <span>
+            <strong>Demo Mode (Sample Data):</strong> Browse and search sample
+            suppliers or inspect their invoices. Adding or editing suppliers is
+            unavailable in read-only demo mode.
+          </span>
+        </div>
+      )}
 
       <Card>
         <div className="flex flex-col gap-3 border-b border-slate-100 p-4 sm:flex-row sm:items-center sm:justify-between">

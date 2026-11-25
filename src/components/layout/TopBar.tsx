@@ -29,6 +29,7 @@ function getInitials(fullName: string): string {
 
 export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
   const {
+    isDemoMode,
     activeRoute,
     currentUser,
     workspaces,
@@ -124,9 +125,11 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
 
   const workspaceLabel = activeWorkspace?.name ?? settings.workspaceName;
   const userName = currentUser?.fullName ?? 'Authenticated User';
-  const roleLabel = activeWorkspaceRole
-    ? ROLE_LABELS[activeWorkspaceRole]
-    : 'Member';
+  const roleLabel = isDemoMode
+    ? 'Read-Only Sample'
+    : activeWorkspaceRole
+      ? ROLE_LABELS[activeWorkspaceRole]
+      : 'Member';
 
   const renderSearchResults = (dropdownClassName: string) => (
     <div
@@ -389,10 +392,17 @@ export function TopBar({ onOpenMobileNav }: { onOpenMobileNav: () => void }) {
             </div>
             <button
               type="button"
+              disabled={isDemoMode}
               onClick={() => void logout()}
-              title="Sign out"
-              aria-label="Sign out"
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-900"
+              title={
+                isDemoMode
+                  ? 'Sign out is unavailable in temporary Demo Mode'
+                  : 'Sign out'
+              }
+              aria-label={
+                isDemoMode ? 'Sign out disabled in Demo Mode' : 'Sign out'
+              }
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <LogOut className="h-4 w-4" />
             </button>

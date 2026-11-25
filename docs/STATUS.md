@@ -1,11 +1,27 @@
 # STATUS — Project Progress
 
-**Current Milestone:** Task 002.7 — Reports API, Formula-Safe CSV Export & Frontend Workspace API Integration (built on `main` `7d4783dc`)
-**Status:** Verified Remote `main` (`7d4783dcd2824b4dda81815a91674a583f812ba0`, CI #26 `45016892293` green across Frontend + Python 3.12 + PostgreSQL 16); Task 002.7 implemented locally (`npm run lint`, 17 `npm test` tests, `npm run build`, and Python `compileall`/AST Passing; Live `pytest`/PostgreSQL 16 Execution & Live Full-Stack Browser QA `BLOCKED` Locally)
+**Current Milestone:** Task 002.8 (Temporary No-Login Demo Mode, built on `main` `2fdde31f` / Task 002.7)
+**Status:** Verified Remote `main` (`2fdde31f67ef8ec541d666fe21525f7978dd2795`, Task 002.7 merged); Task 002.8 implemented locally (`npm run lint`, 20 `npm test` tests, `npm run build`, and Python `compileall` Passing; Live `pytest`/PostgreSQL 16 Execution & Live Full-Stack Browser QA `BLOCKED` Locally)
 
 ---
 
-## Completed Work in Task 002.7 (`7d4783dc` + Reports & Frontend API Patch)
+## Completed Work in Task 002.8 (Temporary No-Login Demo Mode)
+
+1. **Explicit Reversible Configuration (`/.env.example`, `/src/config/demoMode.ts`, `/vite.config.ts`)**
+   - Added `VITE_DEMO_MODE="false"` default in `.env.example` and a strict `resolveDemoMode` helper returning `false` unless explicitly set to `'true'` (no URL query parameter, `localStorage`, or network-error fallback).
+   - Added a build-time console security warning in `vite.config.ts` if `VITE_DEMO_MODE="true"` is active during production builds.
+2. **Strict Frontend Network & Mutation Isolation (`/src/services/apiClient.ts`, `/src/services/demoDataService.ts`, `/src/state/WorkspaceContext.tsx`)**
+   - Added a central `demoModeChecker` guard inside `ApiClient.requestRaw` and `tryRefreshSession` rejecting any attempted HTTP call with `ApiClientError(code: 'DEMO_MODE_API_BLOCKED')` before touching `fetch`, leaving all `backend/` auth/CSRF/RBAC/routes completely unchanged.
+   - Built `demoDataService.ts` reusing `src/data/mockData.ts`, `invoiceService.ts`, and `reportService.ts` to hydrate read-only synthetic `.example` workspace data across Dashboard, Invoices, Review Centre, Suppliers, Reports (`6m`/`12m`/`all`, exceptions, audit events), and Settings.
+   - Guarded `WorkspaceContext` hydration and all mutation/export methods so Demo Mode skips `/auth/me`, disables all backend mutations, and works seamlessly on mobile and desktop.
+3. **Demo Banner, Disabled Mutation Controls & Mobile Layout (`/src/App.tsx`, `/src/components/layout/{AppShell,TopBar}.tsx`, `/src/components/invoices/DocumentPreview.tsx`, 6 SPA Pages)**
+   - Added a high-visibility responsive **`DEMO MODE — SAMPLE DATA`** banner in `AppShell`, disabled Sign Out in `TopBar`, suppressed remote document content URLs in `DocumentPreview`, disabled uploads/manual creation/editing/verification/flagging/flag resolution/reopening/deletion/supplier management/settings saves/CSV export with clear notices, and refined `ReportsPage` / `CardHeader` mobile wrapping.
+4. **Unit Tests (`/tests/demoMode.test.ts`)**
+   - Added unit tests covering `resolveDemoMode` strict defaults, zero-`fetch` `ApiClient` blocking (`DEMO_MODE_API_BLOCKED`), and synthetic dataset consistency across all 6 workspace views (`20` passing tests total).
+
+---
+
+## Completed Work in Task 002.7 (Merged on `main` `2fdde31f67ef8ec541d666fe21525f7978dd2795`)
 
 1. **Backend Reports, Formula-Safe CSV Export & Audit Validation (`backend/app/schemas/reports.py`, `backend/app/services/report_service.py`, `backend/app/api/v1/reports.py`, `backend/app/api/v1/__init__.py`, `backend/app/services/audit_service.py`)**
    - Mounted `/api/v1/workspaces/{workspaceId}/reports/summary`, `/monthly-trend`, `/exceptions`, and `/export.csv`.
@@ -41,10 +57,10 @@
 
 ## Implemented vs. Deferred & MVP-Readiness Boundary
 
-- **Locally Executed & Passing (Container):** React TypeScript lint (`npm run lint`), 17 frontend unit tests (`npm test`), production bundle (`npm run build`), Python bytecode compilation (`python3 -m compileall -q backend/app backend/alembic backend/tests`), and AST import/syntax verification.
-- **Locally Blocked:** Live `pytest` execution (including `backend/tests/test_reports_and_audit.py` and `backend/tests/test_review.py`), Alembic migrations against PostgreSQL 16, and live Playwright browser verification against a running FastAPI + PostgreSQL 16 stack remain `BLOCKED` inside this container due to absent Python 3.12, backend pip dependencies, and PostgreSQL 16; must run on a feature branch in GitHub Actions CI and staging before merging or starting Task 002.8.
-- **A. Required Next Before Controlled Accounting-Firm Pilot (Task 002.8):**
-  - Wire real malware scanning (`ClamAV` async/inline worker) and controlled scan-status transitions (`PENDING -> CLEAN | INFECTED | FAILED`) so uploaded PDFs/images become streamable during pilot review, add upload/stream rate limits, add `S3`/`MinIO` `DocumentStorage` adapter support, configure pilot HTTPS deployment (`COOKIE_SECURE=true`, `CORS_ORIGINS`, `TRUSTED_PROXIES`, persistent storage), and run live Playwright E2E verification against FastAPI + PostgreSQL 16.
+- **Locally Executed & Passing (Container):** React TypeScript lint (`npm run lint`), 20 frontend unit tests (`npm test`), production bundle (`npm run build`), `VITE_DEMO_MODE=true npm run build` toggle build, and Python bytecode compilation (`python3 -m compileall -q backend/app backend/alembic backend/tests`).
+- **Locally Blocked:** Live `pytest` execution (including `backend/tests/test_reports_and_audit.py` and `backend/tests/test_review.py`), Alembic migrations against PostgreSQL 16, and live Playwright browser verification against a running FastAPI + PostgreSQL 16 stack remain `BLOCKED` inside this container due to absent Python 3.12, backend pip dependencies, and PostgreSQL 16; must run on a feature branch in GitHub Actions CI and staging before merge.
+- **A. Required Next Before Controlled Accounting-Firm Pilot (Task 002.9):**
+  - Retire temporary `VITE_DEMO_MODE` bypass, wire real malware scanning (`ClamAV` async/inline worker) and controlled scan-status transitions (`PENDING -> CLEAN | INFECTED | FAILED`) so uploaded PDFs/images become streamable during pilot review, add upload/stream rate limits, add `S3`/`MinIO` `DocumentStorage` adapter support, configure pilot HTTPS deployment (`COOKIE_SECURE=true`, `CORS_ORIGINS`, `TRUSTED_PROXIES`, persistent storage), and run live Playwright E2E verification against FastAPI + PostgreSQL 16.
 - **B. Required Before Production Deployment:**
   - Mandatory ClamAV scanning + quarantine alerting, orphan-blob lifecycle cleanup, workspace storage quotas, automated PostgreSQL backups + PITR restore drills, DBA `SELECT`/`INSERT`-only role grants on `review_actions` and `audit_events`, email verification & password-reset flows, data retention/deletion workflows, and structured monitoring/alerting.
 - **C. Later Releases (Post-MVP):**

@@ -40,6 +40,7 @@ export function DocumentPreview({
   invoice,
   focusedField,
   settings,
+  isDemoMode = false,
 }: {
   workspaceId?: string | null;
   invoice: Invoice;
@@ -48,6 +49,7 @@ export function DocumentPreview({
     WorkspaceSettings,
     'legalEntityName' | 'companyGstin' | 'registeredAddress' | 'workspaceName'
   >;
+  isDemoMode?: boolean;
 }) {
   const [zoom, setZoom] = useState(100);
   const [page, setPage] = useState(1);
@@ -62,7 +64,8 @@ export function DocumentPreview({
       ? 'ring-2 ring-indigo-500 bg-indigo-50/70 rounded px-1.5 py-0.5 -mx-1.5 transition'
       : 'transition';
 
-  const hasRemoteDocument = Boolean(workspaceId && invoice.documentId);
+  const hasRemoteDocument =
+    !isDemoMode && Boolean(workspaceId && invoice.documentId);
   const scanStatus = invoice.documentScanStatus ?? null;
   const isCleanRemoteDocument = hasRemoteDocument && scanStatus === 'CLEAN';
 
@@ -253,9 +256,11 @@ export function DocumentPreview({
                       ])}
                     >
                       <p className="text-[11px] font-semibold text-slate-400">
-                        {hasRemoteDocument
-                          ? 'Structured Invoice Record'
-                          : 'Manual Accounting Entry'}
+                        {isDemoMode
+                          ? 'Sample Document Preview'
+                          : hasRemoteDocument
+                            ? 'Structured Invoice Record'
+                            : 'Manual Accounting Entry'}
                       </p>
                       <h3 className="mt-1 text-base font-bold text-slate-900">
                         {invoice.supplierName || 'Supplier Pending Entry'}

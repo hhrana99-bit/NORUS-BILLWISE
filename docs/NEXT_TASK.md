@@ -1,12 +1,12 @@
 # NEXT_TASK — Exact Next Recommended Development Task
 
-## Baseline & Checkpoint (`7d4783dcd2824b4dda81815a91674a583f812ba0` + Task 002.7)
+## Baseline & Checkpoint (`2fdde31f67ef8ec541d666fe21525f7978dd2795` + Task 002.8)
 
-Remote `main` (`7d4783dcd2824b4dda81815a91674a583f812ba0`) passed GitHub Actions CI run #26 (`45016892293`) completely across Frontend (Node 22) and Backend (Python 3.12 + PostgreSQL 16). Task 002.7 implements the Reports & Formula-Safe CSV Export API (`/reports/summary`, `/monthly-trend`, `/exceptions`, `/export.csv`), `/audit-events` validation/tie-break fixes, and full React SPA API client + `WorkspaceContext` integration, along with `backend/tests/test_reports_and_audit.py` and `tests/apiClient.test.ts`. Apply `NORUS-TASK-002-7.patch` on a dedicated feature branch and verify full green GitHub Actions CI (`pytest -v -ra` against PostgreSQL 16 + Node 22 frontend suite) plus live full-stack browser QA before merging and starting Task 002.8.
+Remote `main` (`2fdde31f67ef8ec541d666fe21525f7978dd2795`) includes Task 002.7 (Reports & Formula-Safe CSV Export API + full React SPA API integration) stacked on verified green CI #26 (`45016892293`). Local workspace changes implement Task 002.8 (Temporary opt-in read-only Demo Mode controlled by `VITE_DEMO_MODE`, defaulting to `"false"`). Apply `NORUS-TASK-002-8.patch` on a dedicated feature branch and verify full green GitHub Actions CI (`pytest -v -ra` against PostgreSQL 16 + Node 22 frontend suite) plus live full-stack browser QA with `VITE_DEMO_MODE="false"` (and optional preview QA with `VITE_DEMO_MODE="true"`) before merging. Remove or retire temporary Demo Mode before controlled customer pilot release.
 
 ---
 
-## Immediate Next Implementation Batch: NORUS BILLWISE TASK 002.8 — Document Malware Scanning Pipeline, Object Storage & Controlled Pilot Readiness
+## Immediate Next Implementation Batch: NORUS BILLWISE TASK 002.9 — Document Malware Scanning Pipeline, Object Storage & Controlled Pilot Readiness
 
 ### Objective
 Enable end-to-end controlled accounting-firm pilot testing by moving uploaded invoice binaries through a real malware-scanning lifecycle (`PENDING -> CLEAN | INFECTED | FAILED`) so verified `CLEAN` PDFs/images stream safely in Review Centre, adding production object storage support, and hardening deployment/rate-limit controls.

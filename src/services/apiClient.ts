@@ -1,3 +1,7 @@
+import {
+  DEMO_MODE_DISABLED_ACTION_MESSAGE,
+  isDemoModeEnabled,
+} from '../config/demoMode';
 import type {
   ApiAuditEvent,
   ApiDuplicateMatch,
@@ -488,6 +492,9 @@ export function extractFilenameFromContentDisposition(
 
 export function formatApiErrorMessage(err: unknown): string {
   if (err instanceof ApiClientError) {
+    if (err.code === 'DEMO_MODE_API_BLOCKED') {
+      return DEMO_MODE_DISABLED_ACTION_MESSAGE;
+    }
     if (err.code === 'NETWORK_ERROR') {
       return 'Unable to reach the NORUS BILLWISE API server. Verify the backend is running.';
     }
@@ -503,15 +510,18 @@ export function formatApiErrorMessage(err: unknown): string {
 export class ApiClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly demoModeChecker: () => boolean;
   private refreshPromise: Promise<boolean> | null = null;
   private unauthorizedHandler: (() => void) | null = null;
 
   constructor(options?: {
     baseUrl?: string;
     fetchImpl?: typeof fetch;
+    demoModeChecker?: () => boolean;
   }) {
     this.baseUrl = resolveApiBaseUrl(options?.baseUrl);
     this.fetchImpl = options?.fetchImpl ?? ((input, init) => fetch(input, init));
+    this.demoModeChecker = options?.demoModeChecker ?? isDemoModeEnabled;
   }
 
   setUnauthorizedHandler(handler: (() => void) | null): void {
@@ -531,6 +541,9 @@ export class ApiClient {
   }
 
   private async tryRefreshSession(): Promise<boolean> {
+    if (this.demoModeChecker()) {
+      return false;
+    }
     if (this.refreshPromise) {
       return this.refreshPromise;
     }
@@ -572,6 +585,14 @@ export class ApiClient {
     } = {},
     allowRefreshRetry = true
   ): Promise<Response> {
+    if (this.demoModeChecker()) {
+      throw new ApiClientError({
+        status: 0,
+        code: 'DEMO_MODE_API_BLOCKED',
+        message: DEMO_MODE_DISABLED_ACTION_MESSAGE,
+      });
+    }
+
     const method = (options.method ?? 'GET').toUpperCase();
     const url = buildApiUrl(this.baseUrl, path, options.query);
     const headers = new Headers();
