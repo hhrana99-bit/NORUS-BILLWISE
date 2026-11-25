@@ -85,7 +85,7 @@ export type PendingNavigation =
 export type AuthStatus = 'checking' | 'authenticated' | 'unauthenticated';
 
 const SESSION_ACTIVE_WORKSPACE_KEY = 'norus_billwise_active_workspace_id';
-const LOCAL_UI_PREFS_KEY = 'norus_billwise_ui_prefs_v1';
+export const LOCAL_UI_PREFS_KEY = 'norus_billwise_ui_prefs_v1';
 
 const DEFAULT_SETTINGS_PLACEHOLDER: WorkspaceSettings = {
   workspaceName: 'Workspace',
@@ -112,6 +112,43 @@ const DEFAULT_SETTINGS_PLACEHOLDER: WorkspaceSettings = {
 const DEFAULT_LOCAL_UI_PREFS: LocalUiPreferences = {
   compactTables: false,
 };
+
+export function getInitialWorkspaceAuthState(
+  isDemoMode: boolean,
+  storedWorkspaceId: string | null = null
+): {
+  authStatus: AuthStatus;
+  currentUser: AuthenticatedUser | null;
+  organizations: OrganizationSummary[];
+  workspaces: WorkspaceMembershipSummary[];
+  activeWorkspaceId: string | null;
+  activeRoute: AppRoute;
+} {
+  if (isDemoMode) {
+    return {
+      authStatus: 'authenticated',
+      currentUser: DEMO_USER,
+      organizations: DEMO_ORGANIZATIONS,
+      workspaces: DEMO_WORKSPACES,
+      activeWorkspaceId: DEMO_WORKSPACE_ID,
+      activeRoute: 'dashboard',
+    };
+  }
+  return {
+    authStatus: 'checking',
+    currentUser: null,
+    organizations: [],
+    workspaces: [],
+    activeWorkspaceId: storedWorkspaceId,
+    activeRoute: 'dashboard',
+  };
+}
+
+export function assertMutationsDisabledInDemo(isDemoMode: boolean): void {
+  if (isDemoMode) {
+    throw new Error(DEMO_MODE_DISABLED_ACTION_MESSAGE);
+  }
+}
 
 export function isLatestRequestSeq(
   currentSeq: number,
@@ -157,10 +194,13 @@ function writeStoredWorkspaceId(workspaceId: string | null): void {
   }
 }
 
-function loadLocalUiPrefs(): LocalUiPreferences {
+export function readLocalUiPrefs(
+  storage: Pick<Storage, 'getItem'> | undefined =
+    typeof localStorage !== 'undefined' ? localStorage : undefined
+): LocalUiPreferences {
   try {
-    if (typeof localStorage === 'undefined') return DEFAULT_LOCAL_UI_PREFS;
-    const raw = localStorage.getItem(LOCAL_UI_PREFS_KEY);
+    if (!storage) return DEFAULT_LOCAL_UI_PREFS;
+    const raw = storage.getItem(LOCAL_UI_PREFS_KEY);
     if (!raw) return DEFAULT_LOCAL_UI_PREFS;
     const parsed = JSON.parse(raw) as Partial<LocalUiPreferences>;
     return {
@@ -171,10 +211,14 @@ function loadLocalUiPrefs(): LocalUiPreferences {
   }
 }
 
-function saveLocalUiPrefs(prefs: LocalUiPreferences): void {
+export function writeLocalUiPrefs(
+  prefs: LocalUiPreferences,
+  storage: Pick<Storage, 'setItem'> | undefined =
+    typeof localStorage !== 'undefined' ? localStorage : undefined
+): void {
   try {
-    if (typeof localStorage === 'undefined') return;
-    localStorage.setItem(LOCAL_UI_PREFS_KEY, JSON.stringify(prefs));
+    if (!storage) return;
+    storage.setItem(LOCAL_UI_PREFS_KEY, JSON.stringify(prefs));
   } catch {
     // Ignore storage quota errors
   }
@@ -313,27 +357,35 @@ const WorkspaceContext = createContext<WorkspaceContextValue | undefined>(
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const isDemoMode = isDemoModeEnabled();
+  const [initialAuthState] = useState(() =>
+    getInitialWorkspaceAuthState(
+      isDemoMode,
+      isDemoMode ? DEMO_WORKSPACE_ID : readStoredWorkspaceId()
+    )
+  );
 
-  const [authStatus, setAuthStatus] = useState<AuthStatus>(() =>
-    isDemoMode ? 'authenticated' : 'checking'
+  const [authStatus, setAuthStatus] = useState<AuthStatus>(
+    initialAuthState.authStatus
   );
   const [currentUser, setCurrentUser] = useState<AuthenticatedUser | null>(
-    () => (isDemoMode ? DEMO_USER : null)
+    initialAuthState.currentUser
   );
   const [organizations, setOrganizations] = useState<OrganizationSummary[]>(
-    () => (isDemoMode ? DEMO_ORGANIZATIONS : [])
+    initialAuthState.organizations
   );
   const [workspaces, setWorkspaces] = useState<WorkspaceMembershipSummary[]>(
-    () => (isDemoMode ? DEMO_WORKSPACES : [])
+    initialAuthState.workspaces
   );
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(
-    () => (isDemoMode ? DEMO_WORKSPACE_ID : readStoredWorkspaceId())
+    initialAuthState.activeWorkspaceId
   );
   const [sessionExpiredMessage, setSessionExpiredMessage] = useState<
     string | null
   >(null);
 
-  const [activeRoute, setActiveRoute] = useState<AppRoute>('dashboard');
+  const [activeRoute, setActiveRoute] = useState<AppRoute>(
+    initialAuthState.activeRoute
+  );
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [invoicesTotal, setInvoicesTotal] = useState<number>(0);
   const [suppliers, setSuppliers] = useState<SupplierSummary[]>([]);
@@ -362,7 +414,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     DEFAULT_SETTINGS_PLACEHOLDER
   );
   const [localUiPrefs, setLocalUiPrefs] = useState<LocalUiPreferences>(() =>
-    loadLocalUiPrefs()
+    readLocalUiPrefs()
   );
 
   const [workspaceLoading, setWorkspaceLoading] = useState<boolean>(false);
@@ -984,9 +1036,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [activeWorkspaceId]);
 
   const assertMutationsEnabled = useCallback(() => {
-    if (isDemoMode) {
-      throw new Error(DEMO_MODE_DISABLED_ACTION_MESSAGE);
-    }
+    assertMutationsDisabledInDemo(isDemoMode);
   }, [isDemoMode]);
 
   const uploadInvoiceFile = useCallback(
@@ -1328,7 +1378,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const updateLocalUiPrefs = useCallback((prefs: LocalUiPreferences) => {
     setLocalUiPrefs(prefs);
-    saveLocalUiPrefs(prefs);
+    writeLocalUiPrefs(prefs);
   }, []);
 
   const activities = useMemo<ActivityEvent[]>(

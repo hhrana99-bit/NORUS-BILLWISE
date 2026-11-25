@@ -4,9 +4,16 @@ import { useWorkspace } from '../../state/WorkspaceContext';
 import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
 
+export const DEMO_MODE_BANNER_TITLE = 'DEMO MODE — SAMPLE DATA';
+
+export function shouldShowDemoBanner(isDemoMode: boolean): boolean {
+  return isDemoMode;
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const { isDemoMode } = useWorkspace();
+  const showDemoBanner = shouldShowDemoBanner(isDemoMode);
 
   return (
     <div className="flex min-h-screen bg-slate-50 text-slate-900">
@@ -16,7 +23,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar onOpenMobileNav={() => setMobileOpen(true)} />
-        {isDemoMode && (
+        {showDemoBanner && (
           <div
             role="status"
             aria-label="Demo mode notice"
@@ -27,7 +34,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-700 sm:mt-0" />
                 <p className="min-w-0 leading-snug">
                   <strong className="font-mono tracking-wide text-amber-950">
-                    DEMO MODE — SAMPLE DATA:
+                    {DEMO_MODE_BANNER_TITLE}:
                   </strong>{' '}
                   Sign-in is temporarily bypassed for read-only preview with
                   synthetic fixtures. Uploads, edits, verification, flagging,

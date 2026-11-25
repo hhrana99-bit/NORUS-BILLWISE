@@ -1,8 +1,10 @@
 # NEXT_TASK — Exact Next Recommended Development Task
 
-## Baseline & Checkpoint (`2fdde31f67ef8ec541d666fe21525f7978dd2795` + Task 002.8)
+## Baseline & Checkpoint (`4a6a9c063df9182d2d2509b77c4781e591a04d1d` + Task 002.8.2 Hardening)
 
-Remote `main` (`2fdde31f67ef8ec541d666fe21525f7978dd2795`) includes Task 002.7 (Reports & Formula-Safe CSV Export API + full React SPA API integration) stacked on verified green CI #26 (`45016892293`). Local workspace changes implement Task 002.8 (Temporary opt-in read-only Demo Mode controlled by `VITE_DEMO_MODE`, defaulting to `"false"`). Apply `NORUS-TASK-002-8.patch` on a dedicated feature branch and verify full green GitHub Actions CI (`pytest -v -ra` against PostgreSQL 16 + Node 22 frontend suite) plus live full-stack browser QA with `VITE_DEMO_MODE="false"` (and optional preview QA with `VITE_DEMO_MODE="true"`) before merging. Remove or retire temporary Demo Mode before controlled customer pilot release.
+Remote `main` (`4a6a9c063df9182d2d2509b77c4781e591a04d1d`) includes Task 002.7 (`2fdde31f`) and Task 002.8 (`4a6a9c06`). Local workspace changes complete Task 002.8.2 (`vite.config.ts` `loadEnv` production Demo Mode warning check + expanded 25-test regression suite + doc alignment).
+
+**Immediate CI Stabilization Prerequisite:** GitHub Actions CI #27 (`45584229786`, `2fdde31f`) and CI #28 (`45586606505`, `4a6a9c06`) passed Node 22 frontend checks and Alembic PostgreSQL 16 migrations, but **FAILED** step 9 (`pytest -v -ra`). Inspect CI logs directly and verify the root cause (including `backend/tests/test_reports_and_audit.py:487,519` where `InvoiceCreateRequest` `_clean_optional_note` strips leading whitespace from `reviewerNote` prior to CSV export) on a dedicated feature branch until CI is completely green (`Frontend` + `Backend pytest`), and run live browser QA with both `VITE_DEMO_MODE="false"` and `VITE_DEMO_MODE="true"` before merging. Remove or retire temporary Demo Mode before controlled customer pilot release.
 
 ---
 

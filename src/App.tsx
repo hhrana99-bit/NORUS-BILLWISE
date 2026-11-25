@@ -65,6 +65,27 @@ function WorkspaceRouter() {
   }
 }
 
+export type AppViewState = 'checking' | 'auth' | 'no-workspace' | 'workspace';
+
+export function resolveAppViewState(params: {
+  isDemoMode: boolean;
+  authStatus: 'checking' | 'authenticated' | 'unauthenticated';
+  workspaceCount: number;
+  activeWorkspaceId: string | null;
+}): AppViewState {
+  const { isDemoMode, authStatus, workspaceCount, activeWorkspaceId } = params;
+  if (!isDemoMode && authStatus === 'checking') {
+    return 'checking';
+  }
+  if (!isDemoMode && authStatus === 'unauthenticated') {
+    return 'auth';
+  }
+  if (workspaceCount === 0 || !activeWorkspaceId) {
+    return 'no-workspace';
+  }
+  return 'workspace';
+}
+
 function AuthenticatedApp() {
   const {
     isDemoMode,
@@ -76,7 +97,14 @@ function AuthenticatedApp() {
     logout,
   } = useWorkspace();
 
-  if (!isDemoMode && authStatus === 'checking') {
+  const viewState = resolveAppViewState({
+    isDemoMode,
+    authStatus,
+    workspaceCount: workspaces.length,
+    activeWorkspaceId,
+  });
+
+  if (viewState === 'checking') {
     return (
       <div
         role="status"
@@ -93,11 +121,11 @@ function AuthenticatedApp() {
     );
   }
 
-  if (!isDemoMode && authStatus === 'unauthenticated') {
+  if (viewState === 'auth') {
     return <AuthScreen />;
   }
 
-  if (workspaces.length === 0 || !activeWorkspaceId) {
+  if (viewState === 'no-workspace') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4">
         <div className="max-w-md rounded-xl border border-slate-200 bg-white p-6 text-center shadow-xs">

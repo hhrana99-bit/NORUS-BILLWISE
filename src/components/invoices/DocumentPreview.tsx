@@ -35,6 +35,53 @@ function deriveBuyerPlaceOfSupply(gstin: string | undefined): string {
   return stateName ? `${code} - ${stateName}` : `State Code ${code}`;
 }
 
+export function resolveDocumentPreviewUrls(params: {
+  isDemoMode: boolean;
+  workspaceId?: string | null;
+  documentId?: string | null;
+  documentScanStatus?: Invoice['documentScanStatus'];
+  getContentUrl?: (
+    workspaceId: string,
+    documentId: string,
+    download: boolean
+  ) => string;
+}): {
+  hasRemoteDocument: boolean;
+  isCleanRemoteDocument: boolean;
+  remotePreviewUrl: string | null;
+  remoteDownloadUrl: string | null;
+} {
+  const {
+    isDemoMode,
+    workspaceId,
+    documentId,
+    documentScanStatus,
+    getContentUrl = (wsId, docId, download) =>
+      apiClient.getDocumentContentUrl(wsId, docId, download),
+  } = params;
+  const hasRemoteDocument =
+    !isDemoMode && Boolean(workspaceId && documentId);
+  const isCleanRemoteDocument =
+    hasRemoteDocument && (documentScanStatus ?? null) === 'CLEAN';
+
+  const remotePreviewUrl =
+    isCleanRemoteDocument && workspaceId && documentId
+      ? getContentUrl(workspaceId, documentId, false)
+      : null;
+
+  const remoteDownloadUrl =
+    isCleanRemoteDocument && workspaceId && documentId
+      ? getContentUrl(workspaceId, documentId, true)
+      : null;
+
+  return {
+    hasRemoteDocument,
+    isCleanRemoteDocument,
+    remotePreviewUrl,
+    remoteDownloadUrl,
+  };
+}
+
 export function DocumentPreview({
   workspaceId,
   invoice,
@@ -64,20 +111,18 @@ export function DocumentPreview({
       ? 'ring-2 ring-indigo-500 bg-indigo-50/70 rounded px-1.5 py-0.5 -mx-1.5 transition'
       : 'transition';
 
-  const hasRemoteDocument =
-    !isDemoMode && Boolean(workspaceId && invoice.documentId);
   const scanStatus = invoice.documentScanStatus ?? null;
-  const isCleanRemoteDocument = hasRemoteDocument && scanStatus === 'CLEAN';
-
-  const remotePreviewUrl =
-    isCleanRemoteDocument && workspaceId && invoice.documentId
-      ? apiClient.getDocumentContentUrl(workspaceId, invoice.documentId, false)
-      : null;
-
-  const remoteDownloadUrl =
-    isCleanRemoteDocument && workspaceId && invoice.documentId
-      ? apiClient.getDocumentContentUrl(workspaceId, invoice.documentId, true)
-      : null;
+  const {
+    hasRemoteDocument,
+    isCleanRemoteDocument,
+    remotePreviewUrl,
+    remoteDownloadUrl,
+  } = resolveDocumentPreviewUrls({
+    isDemoMode,
+    workspaceId,
+    documentId: invoice.documentId,
+    documentScanStatus: invoice.documentScanStatus,
+  });
 
   const isRemotePdf =
     Boolean(remotePreviewUrl) &&

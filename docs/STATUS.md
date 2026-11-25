@@ -1,23 +1,23 @@
 # STATUS — Project Progress
 
-**Current Milestone:** Task 002.8 (Temporary No-Login Demo Mode, built on `main` `2fdde31f` / Task 002.7)
-**Status:** Verified Remote `main` (`2fdde31f67ef8ec541d666fe21525f7978dd2795`, Task 002.7 merged); Task 002.8 implemented locally (`npm run lint`, 20 `npm test` tests, `npm run build`, and Python `compileall` Passing; Live `pytest`/PostgreSQL 16 Execution & Live Full-Stack Browser QA `BLOCKED` Locally)
+**Current Milestone:** Task 002.8 Complete (Demo Mode Integration Audit, Task 002.8.2 Hardening & Verification on `main` `4a6a9c063df9182d2d2509b77c4781e591a04d1d`)
+**Status:** Verified Remote `main` (`4a6a9c063df9182d2d2509b77c4781e591a04d1d`: Task 002.7 + Task 002.8 merged); Task 002.8.2 Vite production env hardening & 25-test regression suite Passing locally; **Note:** GitHub Actions CI #27 (`45584229786`, `2fdde31f`) & CI #28 (`45586606505`, `4a6a9c06`) passed Frontend Node 22 and Alembic PG16 upgrade but **FAILED `pytest -v -ra`** (see details below).
 
 ---
 
-## Completed Work in Task 002.8 (Temporary No-Login Demo Mode)
+## Completed Work in Task 002.8 & Task 002.8.2 (Temporary No-Login Demo Mode + Hardening)
 
-1. **Explicit Reversible Configuration (`/.env.example`, `/src/config/demoMode.ts`, `/vite.config.ts`)**
+1. **Explicit Reversible Configuration & Vite Hardening (`/.env.example`, `/src/config/demoMode.ts`, `/vite.config.ts`)**
    - Added `VITE_DEMO_MODE="false"` default in `.env.example` and a strict `resolveDemoMode` helper returning `false` unless explicitly set to `'true'` (no URL query parameter, `localStorage`, or network-error fallback).
-   - Added a build-time console security warning in `vite.config.ts` if `VITE_DEMO_MODE="true"` is active during production builds.
+   - **Task 002.8.2:** Hardened `vite.config.ts` (`checkProductionDemoModeWarning`) to inspect effective Vite configuration via `loadEnv(mode, process.cwd(), 'VITE_')` merged with `process.env`, ensuring `VITE_DEMO_MODE="true"` triggers the production security warning whether configured in `.env`, `.env.local`, `.env.production`, or shell environment, without exposing env vars via `define` or altering runtime defaults.
 2. **Strict Frontend Network & Mutation Isolation (`/src/services/apiClient.ts`, `/src/services/demoDataService.ts`, `/src/state/WorkspaceContext.tsx`)**
    - Added a central `demoModeChecker` guard inside `ApiClient.requestRaw` and `tryRefreshSession` rejecting any attempted HTTP call with `ApiClientError(code: 'DEMO_MODE_API_BLOCKED')` before touching `fetch`, leaving all `backend/` auth/CSRF/RBAC/routes completely unchanged.
    - Built `demoDataService.ts` reusing `src/data/mockData.ts`, `invoiceService.ts`, and `reportService.ts` to hydrate read-only synthetic `.example` workspace data across Dashboard, Invoices, Review Centre, Suppliers, Reports (`6m`/`12m`/`all`, exceptions, audit events), and Settings.
-   - Guarded `WorkspaceContext` hydration and all mutation/export methods so Demo Mode skips `/auth/me`, disables all backend mutations, and works seamlessly on mobile and desktop.
+   - Guarded `WorkspaceContext` hydration and all mutation/export methods so Demo Mode skips `/auth/me`, disables all backend mutations, keeps `localUiPrefs` strictly browser-local, and works cleanly on mobile and desktop.
 3. **Demo Banner, Disabled Mutation Controls & Mobile Layout (`/src/App.tsx`, `/src/components/layout/{AppShell,TopBar}.tsx`, `/src/components/invoices/DocumentPreview.tsx`, 6 SPA Pages)**
-   - Added a high-visibility responsive **`DEMO MODE — SAMPLE DATA`** banner in `AppShell`, disabled Sign Out in `TopBar`, suppressed remote document content URLs in `DocumentPreview`, disabled uploads/manual creation/editing/verification/flagging/flag resolution/reopening/deletion/supplier management/settings saves/CSV export with clear notices, and refined `ReportsPage` / `CardHeader` mobile wrapping.
-4. **Unit Tests (`/tests/demoMode.test.ts`)**
-   - Added unit tests covering `resolveDemoMode` strict defaults, zero-`fetch` `ApiClient` blocking (`DEMO_MODE_API_BLOCKED`), and synthetic dataset consistency across all 6 workspace views (`20` passing tests total).
+   - Added a high-visibility responsive **`DEMO MODE — SAMPLE DATA`** banner in `AppShell`, disabled Sign Out in `TopBar`, suppressed remote document content/download URLs in `DocumentPreview` (`resolveDocumentPreviewUrls`), disabled uploads/manual creation/editing/verification/flagging/flag resolution/reopening/deletion/supplier management/settings saves/CSV export with clear notices, and refined `ReportsPage` / `CardHeader` mobile wrapping.
+4. **Expanded Regression Suite (`/tests/demoMode.test.ts` — 25 total tests across `tests/*.test.ts`)**
+   - Covers `resolveDemoMode` strict defaults, direct Dashboard bypass vs. `AuthScreen` normal flow (`getInitialWorkspaceAuthState`, `resolveAppViewState`), Demo banner conditional visibility (`shouldShowDemoBanner`), zero-`fetch` `ApiClient` blocking across all 26 endpoints (`DEMO_MODE_API_BLOCKED`), `DocumentPreview` remote URL suppression even when `CLEAN`, mutation throwing + `localUiPrefs` storage isolation, all 6 synthetic workspace datasets, `vite.config.ts` `loadEnv` production warning across `.env.local`/`.env.production`/`process.env`, and all Task 002.7 (`tests/apiClient.test.ts`) and core (`tests/services.test.ts`) suites.
 
 ---
 
@@ -57,11 +57,16 @@
 
 ## Implemented vs. Deferred & MVP-Readiness Boundary
 
-- **Locally Executed & Passing (Container):** React TypeScript lint (`npm run lint`), 20 frontend unit tests (`npm test`), production bundle (`npm run build`), `VITE_DEMO_MODE=true npm run build` toggle build, and Python bytecode compilation (`python3 -m compileall -q backend/app backend/alembic backend/tests`).
-- **Locally Blocked:** Live `pytest` execution (including `backend/tests/test_reports_and_audit.py` and `backend/tests/test_review.py`), Alembic migrations against PostgreSQL 16, and live Playwright browser verification against a running FastAPI + PostgreSQL 16 stack remain `BLOCKED` inside this container due to absent Python 3.12, backend pip dependencies, and PostgreSQL 16; must run on a feature branch in GitHub Actions CI and staging before merge.
-- **A. Required Next Before Controlled Accounting-Firm Pilot (Task 002.9):**
+- **GitHub Actions Remote CI Status (Observed):**
+  - CI #26 (`45016892293`, Task 002.6 `7d4783dc`): Backend `PASS` / Frontend `PASS`.
+  - CI #27 (`45584229786`, Task 002.7 `2fdde31f`) & CI #28 (`45586606505`, Task 002.8 `4a6a9c06`): Frontend Node 22 (`PASS`), Backend compile & Alembic PG16 upgrade (`PASS`), **Backend `pytest -v -ra` (`FAILURE`)**. Raw Actions job logs require repo admin credentials (`HTTP 403`), and static audit identified a deterministic failing test assertion in `backend/tests/test_reports_and_audit.py:487,519` (`InvoiceCreateRequest` `_clean_optional_note` strips leading whitespace from `reviewerNote` before persistence, so exported CSV cell is `"'@SUM(A1:A9) check\tnote"` rather than `"'  @SUM(A1:A9) check\tnote"`).
+- **Locally Executed & Passing (Container):** React TypeScript lint (`npm run lint`), 25 frontend unit tests (`npm test`), production bundle (`npm run build`), `VITE_DEMO_MODE=true` toggle build, `npm audit`, and Python bytecode compilation (`python3 -m compileall -q backend/app backend/alembic backend/tests`).
+- **Locally Blocked:** Live `pytest` execution (`backend/tests/`), Alembic migrations against PostgreSQL 16, and live Playwright browser verification against a running FastAPI + PostgreSQL 16 stack remain `BLOCKED` inside this container due to absent `pytest`, backend Python dependencies, Chromium, and PostgreSQL 16.
+- **A. Required Immediately Before Task 002.9:**
+  - Fix the failing `pytest` test(s) identified in CI #27/#28 (including `backend/tests/test_reports_and_audit.py:487,519`) on a feature branch, apply Task 002.8.2 hardening, and achieve fully green GitHub Actions CI (`Frontend` + `Backend pytest` against PostgreSQL 16).
+- **B. Required Next Before Controlled Accounting-Firm Pilot (Task 002.9):**
   - Retire temporary `VITE_DEMO_MODE` bypass, wire real malware scanning (`ClamAV` async/inline worker) and controlled scan-status transitions (`PENDING -> CLEAN | INFECTED | FAILED`) so uploaded PDFs/images become streamable during pilot review, add upload/stream rate limits, add `S3`/`MinIO` `DocumentStorage` adapter support, configure pilot HTTPS deployment (`COOKIE_SECURE=true`, `CORS_ORIGINS`, `TRUSTED_PROXIES`, persistent storage), and run live Playwright E2E verification against FastAPI + PostgreSQL 16.
-- **B. Required Before Production Deployment:**
+- **C. Required Before Production Deployment:**
   - Mandatory ClamAV scanning + quarantine alerting, orphan-blob lifecycle cleanup, workspace storage quotas, automated PostgreSQL backups + PITR restore drills, DBA `SELECT`/`INSERT`-only role grants on `review_actions` and `audit_events`, email verification & password-reset flows, data retention/deletion workflows, and structured monitoring/alerting.
-- **C. Later Releases (Post-MVP):**
+- **D. Later Releases (Post-MVP):**
   - Automated OCR/AI field extraction + bounding-box evidence workers, bulk CSV/ERP export adapters (Tally/Zoho/SAP), and multi-office practice analytics.

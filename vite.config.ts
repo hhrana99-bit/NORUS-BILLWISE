@@ -3,16 +3,32 @@ import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
 import {fileURLToPath} from 'url';
-import {defineConfig} from 'vite';
+import {defineConfig, loadEnv} from 'vite';
+import {resolveDemoMode} from './src/config/demoMode.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export default defineConfig(({mode}) => {
-  if (mode === 'production' && process.env.VITE_DEMO_MODE === 'true') {
-    console.warn(
-      '[NORUS BILLWISE SECURITY WARNING] VITE_DEMO_MODE="true" is active in a production build. Sign-in is bypassed with read-only synthetic sample data. Do NOT deploy this build for real customer workspaces.'
-    );
+export const DEMO_MODE_PRODUCTION_WARNING =
+  '[NORUS BILLWISE SECURITY WARNING] VITE_DEMO_MODE="true" is active in a production build. Sign-in is bypassed with read-only synthetic sample data. Do NOT deploy this build for real customer workspaces.';
+
+export function checkProductionDemoModeWarning(
+  mode: string,
+  envDir: string = process.cwd(),
+  warn: (message: string) => void = console.warn,
+  processEnv: NodeJS.ProcessEnv = process.env
+): boolean {
+  const fileEnv = loadEnv(mode, envDir, 'VITE_');
+  const effectiveDemoMode =
+    processEnv.VITE_DEMO_MODE ?? fileEnv.VITE_DEMO_MODE;
+  if (mode === 'production' && resolveDemoMode({VITE_DEMO_MODE: effectiveDemoMode})) {
+    warn(DEMO_MODE_PRODUCTION_WARNING);
+    return true;
   }
+  return false;
+}
+
+export default defineConfig(({mode}) => {
+  checkProductionDemoModeWarning(mode, process.cwd());
 
   return {
     plugins: [

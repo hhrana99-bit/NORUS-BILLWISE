@@ -3,7 +3,7 @@
 **Company:** NORUS AI  
 **Product:** NORUS BILLWISE  
 **Tagline:** *Beyond the World.*  
-**Stage:** Task 002.8 — Temporary Read-Only Demo Mode (`2fdde31f` / Task 002.7 baseline)
+**Stage:** Task 002.8 Complete — Demo Mode Audit, Vite Production Hardening & Verification (`4a6a9c06` baseline)
 
 NORUS BILLWISE is an Invoice Intelligence and Verification Workspace built for Chartered Accountants, accounting firms, bookkeeping professionals, and business finance teams (initial target market: India; designed for global expansion).
 
@@ -52,7 +52,7 @@ For frontend-only UI walkthroughs without a running backend or sign-in screen, s
 VITE_DEMO_MODE=true npm run dev
 ```
 
-- **How to disable:** Unset `VITE_DEMO_MODE` or set `VITE_DEMO_MODE="false"` in `.env.local` / shell environment and restart/rebuild. Production customer deployments must never set `VITE_DEMO_MODE="true"`; `vite build` emits a security warning if enabled in production mode.
+- **How to disable:** Unset `VITE_DEMO_MODE` or set `VITE_DEMO_MODE="false"` in `.env.local` / shell environment and restart/rebuild. Production customer deployments must never set `VITE_DEMO_MODE="true"`; `vite.config.ts` resolves effective Vite env via `loadEnv(mode, process.cwd(), 'VITE_')` and emits a security warning during production builds whether set in `.env`, `.env.local`, `.env.production`, or shell `process.env`.
 - **Security & read-only boundaries:** Opens directly to Dashboard labeled **`DEMO MODE — SAMPLE DATA`** using isolated synthetic `.example` fixtures (`src/services/demoDataService.ts`), blocks all `ApiClient` HTTP requests (`DEMO_MODE_API_BLOCKED`), leaves backend authentication/CSRF/RBAC completely untouched, and disables uploads, manual invoice creation, field edits, verification, flagging, flag resolution, reopening, deletion, supplier edits, settings saves, and CSV server exports.
 
 ### Backend
@@ -81,7 +81,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 ```bash
 npm run lint
-npm test      # 20 unit tests across tests/services.test.ts, tests/apiClient.test.ts, and tests/demoMode.test.ts
+npm test      # 25 unit tests across tests/services.test.ts, tests/apiClient.test.ts, and tests/demoMode.test.ts
 npm run build
 ```
 
