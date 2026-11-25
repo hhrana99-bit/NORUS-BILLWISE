@@ -516,7 +516,7 @@ def test_reports_csv_export_rbac_formula_safety_limits_and_audit(
     # Formula payloads neutralized, negative numeric amounts preserved cleanly
     assert row["Invoice Number"] == "'+INV-001,2"
     assert row["Supplier Name"] == "'=CMD|\" /C calc\"!A0"
-    assert row["Reviewer Note"] == "'  @SUM(A1:A9) check\tnote"
+    assert row["Reviewer Note"] == "'@SUM(A1:A9) check\tnote"
     assert row["Round Off"] == "-0.50"
     assert row["Variance Amount"] == "-9.50"
     assert row["Status"] == "VERIFIED"

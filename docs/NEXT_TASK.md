@@ -1,10 +1,10 @@
 # NEXT_TASK — Exact Next Recommended Development Task
 
-## Baseline & Checkpoint (`4a6a9c063df9182d2d2509b77c4781e591a04d1d` + Task 002.8.2 Hardening)
+## Baseline & Checkpoint (`4a6a9c063df9182d2d2509b77c4781e591a04d1d` + Task 002.8.2 + Task 002.7.1)
 
-Remote `main` (`4a6a9c063df9182d2d2509b77c4781e591a04d1d`) includes Task 002.7 (`2fdde31f`) and Task 002.8 (`4a6a9c06`). Local workspace changes complete Task 002.8.2 (`vite.config.ts` `loadEnv` production Demo Mode warning check + expanded 25-test regression suite + doc alignment).
+Remote `main` (`4a6a9c063df9182d2d2509b77c4781e591a04d1d`) includes Task 002.7 (`2fdde31f`) and Task 002.8 (`4a6a9c06`). Local workspace changes include Task 002.8.2 (`vite.config.ts` `loadEnv` production Demo Mode warning check + expanded 25-test regression suite + doc alignment) and Task 002.7.1 (corrected `backend/tests/test_reports_and_audit.py:519` `Reviewer Note` assertion to match `InvoiceCreateRequest` `_clean_optional_note` `.strip()` persistence behavior).
 
-**Immediate CI Stabilization Prerequisite:** GitHub Actions CI #27 (`45584229786`, `2fdde31f`) and CI #28 (`45586606505`, `4a6a9c06`) passed Node 22 frontend checks and Alembic PostgreSQL 16 migrations, but **FAILED** step 9 (`pytest -v -ra`). Inspect CI logs directly and verify the root cause (including `backend/tests/test_reports_and_audit.py:487,519` where `InvoiceCreateRequest` `_clean_optional_note` strips leading whitespace from `reviewerNote` prior to CSV export) on a dedicated feature branch until CI is completely green (`Frontend` + `Backend pytest`), and run live browser QA with both `VITE_DEMO_MODE="false"` and `VITE_DEMO_MODE="true"` before merging. Remove or retire temporary Demo Mode before controlled customer pilot release.
+**Immediate CI Verification Prerequisite:** Run GitHub Actions CI (Node 22 frontend + Python 3.12 / PostgreSQL 16 `pytest -v -ra` expecting `130 passed, 0 failed`) on a dedicated feature branch and run live browser QA with both `VITE_DEMO_MODE="false"` and `VITE_DEMO_MODE="true"` before merging. Remove or retire temporary Demo Mode before controlled customer pilot release.
 
 ---
 
